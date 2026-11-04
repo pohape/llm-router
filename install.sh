@@ -32,11 +32,11 @@ echo "Installing dependencies from requirements.txt..."
 "${SCRIPT_DIR}/venv/bin/pip" install --upgrade pip --quiet
 "${SCRIPT_DIR}/venv/bin/pip" install -r "${SCRIPT_DIR}/requirements.txt" --quiet
 
-# 3. Create config.json from example if missing
-if [ ! -f "${SCRIPT_DIR}/config.json" ]; then
-    echo "config.json not found, copying from config.example.json..."
-    cp "${SCRIPT_DIR}/config.example.json" "${SCRIPT_DIR}/config.json"
-    echo "IMPORTANT: Please edit ${SCRIPT_DIR}/config.json with your actual settings!"
+# 3. Create config.yaml from example if missing
+if [ ! -f "${SCRIPT_DIR}/config.yaml" ]; then
+    echo "config.yaml not found, copying from config.example.yaml..."
+    cp "${SCRIPT_DIR}/config.example.yaml" "${SCRIPT_DIR}/config.yaml"
+    echo "IMPORTANT: Please edit ${SCRIPT_DIR}/config.yaml with your actual settings!"
 fi
 
 # 4. Detect path to agy binary or use standard locations

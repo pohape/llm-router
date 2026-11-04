@@ -2,12 +2,13 @@
 
 import base64
 import json
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 from flask import Flask
 
 from auth import setup_auth
-from config import AppConfig, WorkerTarget, parse_bool, validate_config_data
+from config import AppConfig, WorkerTarget, load_config, parse_bool, validate_config_data
 from executor import extract_json_payload
 from fallback import (
     FallbackConfig,
@@ -71,6 +72,76 @@ class TestConfig(unittest.TestCase):
         w2 = WorkerTarget("http://llm2.example.com:8443", "u", "p")
         self.assertEqual(w2.clean_host, "llm2.example.com:8443")
         self.assertEqual(w2.base_url, "https://llm2.example.com:8443")
+
+
+class TestYAMLLoading(unittest.TestCase):
+    def test_load_config_yaml_valid(self):
+        yaml_content = """
+is_worker: false
+is_router: true
+port: 8741
+user: testuser
+password: testpass
+workers:
+  - host: w1.example.com
+    user: u
+    password: p
+fallback:
+  enabled: true
+  api_key: sk-proj-1234567890
+  model: gpt-6-luna
+  reasoning_effort: high
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            cfg = load_config(temp_path)
+            self.assertFalse(cfg.is_worker)
+            self.assertTrue(cfg.is_router)
+            self.assertEqual(cfg.user, "testuser")
+            self.assertEqual(cfg.password, "testpass")
+            self.assertEqual(len(cfg.workers), 1)
+            self.assertEqual(cfg.workers[0].clean_host, "w1.example.com")
+            self.assertIsNotNone(cfg.fallback)
+            self.assertEqual(cfg.fallback.model, "gpt-6-luna")
+            self.assertEqual(cfg.fallback.reasoning_effort, "high")
+        finally:
+            import os
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_load_config_yaml_invalid_syntax(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write("key: [unclosed list")
+            temp_path = f.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                load_config(temp_path)
+            self.assertIn("not valid YAML", str(ctx.exception))
+        finally:
+            import os
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_load_config_yaml_not_dict(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write("- item1\n- item2\n")
+            temp_path = f.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                load_config(temp_path)
+            self.assertIn("must define a YAML dictionary", str(ctx.exception))
+        finally:
+            import os
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_load_config_file_not_found(self):
+        with self.assertRaises(FileNotFoundError) as ctx:
+            load_config("/nonexistent/path/to/config.yaml")
+        self.assertIn("config.example.yaml", str(ctx.exception))
 
 
 class TestQuotaParsing(unittest.TestCase):

@@ -1,11 +1,11 @@
 """Configuration loading, validation, and structures for llm-router."""
 
 from dataclasses import dataclass, field
-import json
 import os
 import shutil
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+import yaml
 
 from fallback import (
     DEFAULT_BASE_URL,
@@ -15,7 +15,7 @@ from fallback import (
     FallbackConfig,
 )
 
-CONFIG_FILENAME = "config.json"
+CONFIG_FILENAME = "config.yaml"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, CONFIG_FILENAME)
 
@@ -379,14 +379,17 @@ def load_config(path: Optional[str] = None) -> AppConfig:
     if not os.path.exists(config_path):
         raise FileNotFoundError(
             f"Config file not found at: {config_path}\n"
-            f"Please copy config.example.json to config.json and adjust settings."
+            f"Please copy config.example.yaml to config.yaml and adjust settings."
         )
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Config file {config_path} is not valid JSON: {e}")
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Config file {config_path} is not valid YAML: {e}")
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file {config_path} must define a YAML dictionary (got: {type(data).__name__})")
 
     results = validate_config_data(data)
     errors = [msg for lvl, msg in results if lvl == "ERROR"]

@@ -4,6 +4,7 @@ venv/
 env/
 
 # Configuration (contains credentials)
+config.yaml
 config.json
 
 # Runtime data (cache, limits)

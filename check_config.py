@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
 CLI validation tool for llm-router configuration and system environment.
-Inspects config.json and reports status with colored console output.
+Inspects config.yaml and reports status with colored console output.
 """
 
 import argparse
-import json
 import os
 import sys
+import yaml
 
 from config import DEFAULT_CONFIG_PATH, validate_config_data
 from console_helper import Color, color_text, print_err, print_ok, print_warn
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate llm-router config.json and environment.")
+    parser = argparse.ArgumentParser(description="Validate llm-router config.yaml and environment.")
     parser.add_argument(
         "--config",
         default=DEFAULT_CONFIG_PATH,
@@ -29,17 +29,21 @@ def main() -> int:
     if not os.path.exists(args.config):
         print_err(f"Config file not found: {args.config}")
         print()
-        color_text("Tip: copy config.example.json to config.json and fill in your values.", Color.MUTED)
+        color_text("Tip: copy config.example.yaml to config.yaml and fill in your values.", Color.MUTED)
         return 1
 
     try:
         with open(args.config, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        print_err(f"JSON syntax error in {args.config}: {e}")
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        print_err(f"YAML syntax error in {args.config}: {e}")
         return 1
     except Exception as e:
         print_err(f"Cannot read {args.config}: {e}")
+        return 1
+
+    if not isinstance(data, dict):
+        print_err(f"Configuration file {args.config} must contain a YAML mapping/dictionary (got: {type(data).__name__}).")
         return 1
 
     results = validate_config_data(data)

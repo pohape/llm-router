@@ -78,8 +78,8 @@ cd ~/GitHub/llm-router
 ### 2. Configure
 Copy the example configuration:
 ```bash
-cp config.example.json config.json
-nano config.json
+cp config.example.yaml config.yaml
+nano config.yaml
 ```
 
 Verify your configuration and system environment:
@@ -113,38 +113,31 @@ sudo systemctl reload caddy
 
 ---
 
-## Configuration Reference (`config.json`)
+## Configuration Reference (`config.yaml`)
 
-```json
-{
-  "is_worker": true,
-  "is_router": false,
-  "port": 8741,
-  "user": "admin",
-  "password": "your-secure-password",
+```yaml
+is_worker: true
+is_router: false
+port: 8741
+user: admin
+password: your-secure-password
 
-  "workers": [
-    {
-      "host": "llm1.example.com",
-      "user": "admin",
-      "password": "worker1-password"
-    },
-    {
-      "host": "llm2.example.com",
-      "user": "admin",
-      "password": "worker2-password"
-    }
-  ],
+workers:
+  - host: llm1.example.com
+    user: admin
+    password: worker1-password
 
-  "fallback": {
-    "enabled": true,
-    "api_key": "sk-your-openai-api-key",
-    "base_url": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini",
-    "reasoning_effort": "medium",
-    "timeout": 120
-  }
-}
+  - host: llm2.example.com
+    user: admin
+    password: worker2-password
+
+fallback:
+  enabled: true
+  api_key: sk-your-openai-api-key
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  reasoning_effort: medium
+  timeout: 120
 ```
 
 ### Configuration Options

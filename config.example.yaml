@@ -1,0 +1,40 @@
+# ==============================================================================
+# llm-router Configuration
+# ==============================================================================
+# Role mode flags:
+# - Worker only: is_worker: true,  is_router: false
+# - Router only: is_worker: false, is_router: true
+# - Hybrid:      is_worker: true,  is_router: true
+is_worker: true
+is_router: false
+
+# Local TCP listening port for the Flask application (default: 8741)
+# Caddy or another reverse proxy should forward external HTTPS traffic to this port.
+port: 8741
+
+# HTTP Basic Authentication credentials for this node
+user: admin
+password: changeme
+
+# Target workers list (required if is_router: true)
+# Each entry defines a remote worker node running llm-router in worker mode.
+workers:
+  - host: llm1.example.com
+    user: admin
+    password: changeme
+
+  - host: llm2.example.com
+    user: admin
+    password: changeme
+
+# External API Fallback (optional, used in Router mode)
+# Automatically called when all workers are offline or their quotas are exhausted.
+fallback:
+  enabled: false
+  api_key: sk-your-api-key-here
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  # Reasoning depth for thinking models: low, medium, or high (omit for standard models)
+  reasoning_effort: medium
+  timeout: 120
+  # max_tokens: 16384  # Optional output token limit. Omit to use model's natural default.
