@@ -1,0 +1,12 @@
+# Caddy configuration example for llm-router
+# Add this block to your /etc/caddy/Caddyfile (or /etc/caddy/conf.d/)
+
+llm1.example.com {
+    # Caddy automatically provisions and renews TLS certificates via Let's Encrypt / ZeroSSL
+    reverse_proxy 127.0.0.1:8741
+}
+
+# If running a dedicated router node on another domain:
+# llm-router.example.com {
+#     reverse_proxy 127.0.0.1:8741
+# }

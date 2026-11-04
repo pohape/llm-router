@@ -1,0 +1,22 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Configuration (contains credentials)
+config.json
+
+# Runtime data (cache, limits)
+data/
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# System / Editor
+.DS_Store
+.idea/
+.vscode/

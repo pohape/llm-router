@@ -1,0 +1,19 @@
+{
+  "is_worker": true,
+  "is_router": false,
+  "port": 8741,
+  "user": "admin",
+  "password": "changeme",
+  "workers": [
+    {
+      "host": "llm1.example.com",
+      "user": "admin",
+      "password": "changeme"
+    },
+    {
+      "host": "llm2.example.com",
+      "user": "admin",
+      "password": "changeme"
+    }
+  ]
+}
