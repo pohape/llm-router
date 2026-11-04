@@ -1,4 +1,4 @@
-# llm-router
+# LLM router
 
 A lightweight, self-hosted HTTP API and load balancer for the `agy` CLI with automated quota-based routing.
 
@@ -271,9 +271,3 @@ When a request arrives at `/router/chat`:
 git pull
 sudo systemctl restart llm-router
 ```
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
