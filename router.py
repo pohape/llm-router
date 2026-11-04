@@ -158,15 +158,16 @@ def create_router_blueprint(
         model: str,
         statuses: List[WorkerStatus],
         timeout: Optional[int] = None,
+        effort: Optional[str] = None,
         worker_errors: Optional[List[str]] = None,
     ):
         """Attempt OpenAI-compatible fallback API call and return Flask response."""
         logger.info(
-            "All workers exhausted/failed for group=%s, attempting fallback API",
-            quota_group
+            "All workers exhausted/failed for group=%s, attempting fallback API (effort=%s)",
+            quota_group, effort or fb_config.reasoning_effort
         )
         try:
-            result = call_openai_fallback(prompt, fb_config, timeout=timeout)
+            result = call_openai_fallback(prompt, fb_config, timeout=timeout, effort=effort)
             flask_resp = jsonify(result)
             flask_resp.headers["X-Routed-Worker"] = "openai-fallback"
             flask_resp.headers["X-Routed-Model-Group"] = "fallback"
@@ -205,6 +206,7 @@ def create_router_blueprint(
             "online_workers": online_count,
             "fallback_configured": fallback_config is not None,
             "fallback_model": fallback_config.model if fallback_config else None,
+            "fallback_reasoning_effort": fallback_config.reasoning_effort if fallback_config else None,
             "workers": [s.to_dict() for s in statuses]
         })
 
@@ -220,6 +222,7 @@ def create_router_blueprint(
 
         model = str(body.get("model") or "gemini-3.8-flash-high")
         quota_group = get_model_quota_group(model)
+        effort = str(body["effort"]).strip() if body.get("effort") else None
         timeout_raw = body.get("timeout", 300)
         try:
             timeout_val = int(timeout_raw)
@@ -236,7 +239,7 @@ def create_router_blueprint(
             if fallback_config:
                 return _try_fallback(
                     prompt, fallback_config, quota_group, model,
-                    statuses, timeout=timeout_val
+                    statuses, timeout=timeout_val, effort=effort
                 )
 
             return jsonify({
@@ -298,7 +301,7 @@ def create_router_blueprint(
         if fallback_config:
             return _try_fallback(
                 prompt, fallback_config, quota_group, model,
-                statuses, timeout=timeout_val, worker_errors=errors
+                statuses, timeout=timeout_val, effort=effort, worker_errors=errors
             )
 
         return jsonify({

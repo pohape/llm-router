@@ -132,6 +132,7 @@ sudo systemctl reload caddy
     "api_key": "sk-your-openai-api-key",
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
+    "reasoning_effort": "medium",
     "timeout": 120
   }
 }
@@ -150,6 +151,7 @@ sudo systemctl reload caddy
 | `fallback.api_key` | `string` | API key for OpenAI or any OpenAI-compatible provider. |
 | `fallback.base_url` | `string` | Base URL (default: `https://api.openai.com/v1`). Supports Groq, Together, OpenRouter, vLLM, etc. |
 | `fallback.model` | `string` | Fallback model name (default: `gpt-4o-mini`). |
+| `fallback.reasoning_effort` | `string` | (Optional) Reasoning depth for thinking models: `"low"`, `"medium"`, `"high"`. |
 | `fallback.timeout` | `int` | Timeout in seconds (default: `120`). |
 | `fallback.max_tokens` | `int` | (Optional) Max completion tokens. If omitted, uses model's natural default. |
 

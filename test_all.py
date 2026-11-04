@@ -9,7 +9,12 @@ from flask import Flask
 from auth import setup_auth
 from config import AppConfig, WorkerTarget, parse_bool, validate_config_data
 from executor import extract_json_payload
-from fallback import FallbackConfig, FallbackError, call_openai_fallback
+from fallback import (
+    FallbackConfig,
+    FallbackError,
+    call_openai_fallback,
+    normalize_usage,
+)
 from limiter import LimitsTracker, parse_quota_data
 from router import (
     WorkerStatus,
@@ -362,6 +367,51 @@ class TestFallbackConfig(unittest.TestCase):
         self.assertEqual(cfg.model, "gpt-4o-mini")
         self.assertEqual(cfg.timeout, 120)
         self.assertIsNone(cfg.max_tokens)
+        self.assertIsNone(cfg.reasoning_effort)
+
+    def test_fallback_config_reasoning_effort_valid(self):
+        for eff in ("low", "medium", "high"):
+            data = {
+                "is_worker": False, "is_router": True, "port": 8741,
+                "user": "u", "password": "p",
+                "workers": [{"host": "w.example.com", "user": "u", "password": "p"}],
+                "fallback": {"enabled": True, "api_key": "sk-real-1234", "reasoning_effort": eff}
+            }
+            results = validate_config_data(data)
+            errors = [msg for lvl, msg in results if lvl == "ERROR"]
+            self.assertEqual(errors, [])
+
+    def test_fallback_config_reasoning_effort_invalid(self):
+        data = {
+            "is_worker": False, "is_router": True, "port": 8741,
+            "user": "u", "password": "p",
+            "workers": [{"host": "w.example.com", "user": "u", "password": "p"}],
+            "fallback": {"enabled": True, "api_key": "sk-real-1234", "reasoning_effort": "extreme"}
+        }
+        results = validate_config_data(data)
+        errors = [msg for lvl, msg in results if lvl == "ERROR"]
+        self.assertTrue(any("reasoning_effort" in e for e in errors))
+
+    def test_normalize_usage_with_reasoning(self):
+        raw = {
+            "prompt_tokens": 15,
+            "completion_tokens": 40,
+            "total_tokens": 55,
+            "completion_tokens_details": {"reasoning_tokens": 12}
+        }
+        u = normalize_usage(raw)
+        self.assertEqual(u["input_tokens"], 15)
+        self.assertEqual(u["output_tokens"], 40)
+        self.assertEqual(u["total_tokens"], 55)
+        self.assertEqual(u["thinking_tokens"], 12)
+        self.assertEqual(u["prompt_tokens"], 15)
+        self.assertEqual(u["completion_tokens"], 40)
+
+    def test_normalize_usage_empty(self):
+        u = normalize_usage(None)
+        self.assertEqual(u["input_tokens"], 0)
+        self.assertEqual(u["output_tokens"], 0)
+        self.assertEqual(u["thinking_tokens"], 0)
 
     def test_fallback_config_null_fields(self):
         """Ensure JSON with explicit null values parses with defaults without crashing."""
@@ -382,6 +432,7 @@ class TestFallbackConfig(unittest.TestCase):
         self.assertEqual(cfg.model, "gpt-4o-mini")
         self.assertEqual(cfg.timeout, 120)
         self.assertIsNone(cfg.max_tokens)
+        self.assertIsNone(cfg.reasoning_effort)
 
 
 class TestFallbackAPI(unittest.TestCase):
@@ -400,9 +451,15 @@ class TestFallbackAPI(unittest.TestCase):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
+            "id": "chatcmpl-test12345",
             "choices": [{"message": {"content": "Hello from OpenAI"}}],
             "model": "gpt-4o-mini-2024-07-18",
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "completion_tokens_details": {"reasoning_tokens": 3}
+            }
         }
         with patch("fallback.requests.post", return_value=mock_resp):
             result = call_openai_fallback("Say hello", self._make_config())
@@ -410,7 +467,14 @@ class TestFallbackAPI(unittest.TestCase):
         self.assertEqual(result["response"], "Hello from OpenAI")
         self.assertEqual(result["source"], "openai-fallback")
         self.assertEqual(result["model"], "gpt-4o-mini-2024-07-18")
-        self.assertIn("usage", result)
+        self.assertEqual(result["conversation_id"], "chatcmpl-test12345")
+        self.assertGreaterEqual(result["duration_seconds"], 0.0)
+        self.assertEqual(result["usage"]["input_tokens"], 10)
+        self.assertEqual(result["usage"]["output_tokens"], 5)
+        self.assertEqual(result["usage"]["total_tokens"], 15)
+        self.assertEqual(result["usage"]["thinking_tokens"], 3)
+        self.assertEqual(result["usage"]["prompt_tokens"], 10)
+        self.assertEqual(result["usage"]["completion_tokens"], 5)
 
     def test_openai_fallback_401(self):
         mock_resp = MagicMock()
@@ -514,6 +578,26 @@ class TestFallbackAPI(unittest.TestCase):
         with patch("fallback.requests.post", return_value=mock_resp):
             res = call_openai_fallback("Привет мир", self._make_config())
         self.assertEqual(res["response"], "Привет, это ответ на русском!")
+
+    def test_openai_fallback_reasoning_effort_from_config(self):
+        cfg = FallbackConfig(api_key="sk-test", reasoning_effort="high")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        with patch("fallback.requests.post", return_value=mock_resp) as mock_post:
+            call_openai_fallback("test", cfg)
+            payload = mock_post.call_args.kwargs["json"]
+            self.assertEqual(payload.get("reasoning_effort"), "high")
+
+    def test_openai_fallback_reasoning_effort_dynamic_override(self):
+        cfg = FallbackConfig(api_key="sk-test", reasoning_effort="medium")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        with patch("fallback.requests.post", return_value=mock_resp) as mock_post:
+            call_openai_fallback("test", cfg, effort="low")
+            payload = mock_post.call_args.kwargs["json"]
+            self.assertEqual(payload.get("reasoning_effort"), "low")
 
 
 class TestRouterFallbackIntegration(unittest.TestCase):

@@ -11,6 +11,7 @@ from fallback import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
+    VALID_REASONING_EFFORTS,
     FallbackConfig,
 )
 
@@ -154,6 +155,15 @@ def _validate_fallback_config(data: Dict[str, Any]) -> List[Tuple[str, str]]:
             results.append(("ERROR", f"'fallback.max_tokens' must be an integer between 1 and 128000 (got: {raw_tokens})"))
     else:
         results.append(("OK", "Fallback max_tokens: unlimited (model default)"))
+
+    raw_effort = fallback.get("reasoning_effort")
+    if raw_effort is not None:
+        if isinstance(raw_effort, str) and raw_effort.strip().lower() in VALID_REASONING_EFFORTS:
+            results.append(("OK", f"Fallback reasoning_effort: '{raw_effort.strip().lower()}'"))
+        else:
+            results.append(("ERROR", f"'fallback.reasoning_effort' must be one of {sorted(list(VALID_REASONING_EFFORTS))} (got: {repr(raw_effort)})"))
+    else:
+        results.append(("OK", "Fallback reasoning_effort: not configured (model default)"))
 
     return results
 
@@ -345,11 +355,19 @@ def _parse_fallback_config(data: Dict[str, Any]) -> Optional[FallbackConfig]:
         except (ValueError, TypeError):
             max_tokens = None
 
+    raw_effort = fallback.get("reasoning_effort")
+    reasoning_effort = None
+    if raw_effort and isinstance(raw_effort, str):
+        clean_eff = raw_effort.strip().lower()
+        if clean_eff in VALID_REASONING_EFFORTS:
+            reasoning_effort = clean_eff
+
     return FallbackConfig(
         api_key=api_key_val.strip(),
         base_url=base_url,
         model=model,
         timeout=timeout,
+        reasoning_effort=reasoning_effort,
         max_tokens=max_tokens,
     )
 
