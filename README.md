@@ -125,7 +125,16 @@ sudo systemctl reload caddy
       "user": "admin",
       "password": "worker2-password"
     }
-  ]
+  ],
+
+  "fallback": {
+    "enabled": true,
+    "api_key": "sk-your-openai-api-key",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "timeout": 120,
+    "max_tokens": 16384
+  }
 }
 ```
 
@@ -137,6 +146,13 @@ sudo systemctl reload caddy
 | `user` | `string` | HTTP Basic Auth username for this node. |
 | `password` | `string` | HTTP Basic Auth password for this node. |
 | `workers` | `list` | Target workers list (required if `is_router: true`). |
+| `fallback` | `object` | Optional fallback to OpenAI-compatible API when all workers are offline or exhausted. |
+| `fallback.enabled` | `bool` | Enables or disables API fallback. |
+| `fallback.api_key` | `string` | API key for OpenAI or any OpenAI-compatible provider. |
+| `fallback.base_url` | `string` | Base URL (default: `https://api.openai.com/v1`). Supports Groq, Together, OpenRouter, vLLM, etc. |
+| `fallback.model` | `string` | Fallback model name (default: `gpt-4o-mini`). |
+| `fallback.timeout` | `int` | Timeout in seconds (default: `120`). |
+| `fallback.max_tokens` | `int` | Max completion tokens (default: `16384`). |
 
 ---
 
@@ -263,6 +279,10 @@ When a request arrives at `/router/chat`:
    Remaining online workers are sorted descending by their 5-hour quota fraction.
 5. **Failover**:
    The router forwards the call to the top worker. If that worker experiences a connection failure or server error, the router automatically fails over to the next candidate in the ranked list.
+6. **OpenAI-Compatible Fallback**:
+   If all eligible workers are exhausted (weekly quota = 0), offline, or returned errors during failover, the router automatically routes the prompt to the configured fallback API (OpenAI, OpenRouter, Groq, etc.). Response headers indicate fallback routing:
+   - `X-Routed-Worker: openai-fallback`
+   - `X-Routed-Model-Group: fallback`
 
 ---
 

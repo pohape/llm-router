@@ -7,6 +7,14 @@ import shutil
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from fallback import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_MODEL,
+    DEFAULT_TIMEOUT,
+    FallbackConfig,
+)
+
 CONFIG_FILENAME = "config.json"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, CONFIG_FILENAME)
@@ -42,6 +50,7 @@ class AppConfig:
     user: str
     password: str
     workers: List[WorkerTarget] = field(default_factory=list)
+    fallback: Optional[FallbackConfig] = None
 
 
 def parse_bool(value: Any) -> Optional[bool]:
@@ -75,6 +84,77 @@ def resolve_agy_binary() -> Optional[str]:
         return user_local
 
     return None
+
+
+def _validate_fallback_config(data: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Validate the optional 'fallback' section of the configuration."""
+    results: List[Tuple[str, str]] = []
+
+    fallback = data.get("fallback")
+    if fallback is None:
+        results.append(("OK", "No fallback section configured (OpenAI fallback disabled)."))
+        return results
+
+    if not isinstance(fallback, dict):
+        results.append(("ERROR", "'fallback' must be a dictionary object."))
+        return results
+
+    enabled = parse_bool(fallback.get("enabled"))
+    if enabled is None:
+        results.append((
+            "ERROR",
+            "'fallback.enabled' must be true/false, but got: "
+            f"{repr(fallback.get('enabled'))}",
+        ))
+        return results
+
+    if not enabled:
+        results.append(("OK", "Fallback is explicitly disabled (enabled: false)."))
+        return results
+
+    # Fallback is enabled — validate required fields
+    api_key = fallback.get("api_key")
+    if not api_key or not isinstance(api_key, str) or not api_key.strip():
+        results.append(("ERROR", "'fallback.api_key' is required when fallback is enabled."))
+    elif api_key.strip() == "sk-your-api-key-here":
+        results.append(("WARN", "'fallback.api_key' contains placeholder value 'sk-your-api-key-here'."))
+    else:
+        # Show first 8 + last 4 chars for identification
+        clean_key = api_key.strip()
+        masked = clean_key[:8] + "..." + clean_key[-4:] if len(clean_key) > 16 else "***"
+        results.append(("OK", f"Fallback API key: {masked}"))
+
+    raw_base_url = fallback.get("base_url")
+    base_url = DEFAULT_BASE_URL if raw_base_url is None else str(raw_base_url).strip()
+    if not base_url:
+        results.append(("ERROR", "'fallback.base_url' must be a non-empty string."))
+    elif not base_url.startswith("https://"):
+        results.append(("WARN", f"'fallback.base_url' does not use HTTPS: '{base_url}'"))
+    else:
+        results.append(("OK", f"Fallback base URL: {base_url}"))
+
+    raw_model = fallback.get("model")
+    model = DEFAULT_MODEL if raw_model is None else str(raw_model).strip()
+    if model:
+        results.append(("OK", f"Fallback model: {model}"))
+    else:
+        results.append(("WARN", f"'fallback.model' is empty, will use default: {DEFAULT_MODEL}"))
+
+    raw_timeout = fallback.get("timeout")
+    timeout = DEFAULT_TIMEOUT if raw_timeout is None else raw_timeout
+    if isinstance(timeout, int) and 1 <= timeout <= 600:
+        results.append(("OK", f"Fallback timeout: {timeout}s"))
+    else:
+        results.append(("ERROR", f"'fallback.timeout' must be an integer between 1 and 600 (got: {timeout})"))
+
+    raw_tokens = fallback.get("max_tokens")
+    max_tokens = DEFAULT_MAX_TOKENS if raw_tokens is None else raw_tokens
+    if isinstance(max_tokens, int) and 1 <= max_tokens <= 128000:
+        results.append(("OK", f"Fallback max_tokens: {max_tokens}"))
+    else:
+        results.append(("ERROR", f"'fallback.max_tokens' must be an integer between 1 and 128000 (got: {max_tokens})"))
+
+    return results
 
 
 def validate_config_data(data: Dict[str, Any]) -> List[Tuple[str, str]]:
@@ -218,7 +298,57 @@ def validate_config_data(data: Dict[str, Any]) -> List[Tuple[str, str]]:
                         f"Worker #{idx + 1} has invalid or missing 'password'.",
                     ))
 
+    # 6. Check fallback configuration
+    results.extend(_validate_fallback_config(data))
+
     return results
+
+
+def _parse_fallback_config(data: Dict[str, Any]) -> Optional[FallbackConfig]:
+    """Parse the fallback section from config data, returning None if disabled or missing."""
+    fallback = data.get("fallback")
+    if not fallback or not isinstance(fallback, dict):
+        return None
+
+    enabled = parse_bool(fallback.get("enabled"))
+    if not enabled:
+        return None
+
+    api_key_val = fallback.get("api_key")
+    if not api_key_val or not isinstance(api_key_val, str) or not api_key_val.strip():
+        return None
+
+    # Safe parsing of URL and model with fallback to defaults
+    raw_base_url = fallback.get("base_url")
+    base_url = str(raw_base_url).strip() if raw_base_url else DEFAULT_BASE_URL
+
+    raw_model = fallback.get("model")
+    model = str(raw_model).strip() if raw_model else DEFAULT_MODEL
+
+    # Safe parsing of integer values
+    raw_timeout = fallback.get("timeout")
+    timeout = DEFAULT_TIMEOUT
+    if raw_timeout is not None:
+        try:
+            timeout = int(raw_timeout)
+        except (ValueError, TypeError):
+            timeout = DEFAULT_TIMEOUT
+
+    raw_max_tokens = fallback.get("max_tokens")
+    max_tokens = DEFAULT_MAX_TOKENS
+    if raw_max_tokens is not None:
+        try:
+            max_tokens = int(raw_max_tokens)
+        except (ValueError, TypeError):
+            max_tokens = DEFAULT_MAX_TOKENS
+
+    return FallbackConfig(
+        api_key=api_key_val.strip(),
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+        max_tokens=max_tokens,
+    )
 
 
 def load_config(path: Optional[str] = None) -> AppConfig:
@@ -260,4 +390,5 @@ def load_config(path: Optional[str] = None) -> AppConfig:
         user=str(data.get("user")),
         password=str(data.get("password")),
         workers=workers_list,
+        fallback=_parse_fallback_config(data),
     )

@@ -10,6 +10,7 @@ from flask import Blueprint, Response, jsonify, request
 import requests
 
 from config import WorkerTarget
+from fallback import FallbackConfig, FallbackError, call_openai_fallback
 
 logger = logging.getLogger("llm-router.router")
 
@@ -144,8 +145,44 @@ def select_best_workers(
     return eligible
 
 
-def create_router_blueprint(workers: List[WorkerTarget]) -> Blueprint:
+def create_router_blueprint(
+    workers: List[WorkerTarget],
+    fallback_config: Optional[FallbackConfig] = None,
+) -> Blueprint:
     bp = Blueprint("router", __name__, url_prefix="/router")
+
+    def _try_fallback(
+        prompt: str,
+        fb_config: FallbackConfig,
+        quota_group: str,
+        model: str,
+        statuses: List[WorkerStatus],
+        timeout: Optional[int] = None,
+        worker_errors: Optional[List[str]] = None,
+    ):
+        """Attempt OpenAI-compatible fallback API call and return Flask response."""
+        logger.info(
+            "All workers exhausted/failed for group=%s, attempting fallback API",
+            quota_group
+        )
+        try:
+            result = call_openai_fallback(prompt, fb_config, timeout=timeout)
+            flask_resp = jsonify(result)
+            flask_resp.headers["X-Routed-Worker"] = "openai-fallback"
+            flask_resp.headers["X-Routed-Model-Group"] = "fallback"
+            return flask_resp
+        except FallbackError as e:
+            logger.error("Fallback API also failed: %s", e.message)
+            error_response: Dict[str, Any] = {
+                "error": "All workers and fallback failed",
+                "fallback_error": e.message,
+            }
+            if worker_errors:
+                error_response["worker_errors"] = worker_errors
+            else:
+                error_response["workers_summary"] = [s.to_dict() for s in statuses]
+
+            return jsonify(error_response), 502
 
     def _fetch_all_worker_statuses() -> List[WorkerStatus]:
         statuses: List[WorkerStatus] = []
@@ -166,6 +203,8 @@ def create_router_blueprint(workers: List[WorkerTarget]) -> Blueprint:
         return jsonify({
             "total_workers": len(workers),
             "online_workers": online_count,
+            "fallback_configured": fallback_config is not None,
+            "fallback_model": fallback_config.model if fallback_config else None,
             "workers": [s.to_dict() for s in statuses]
         })
 
@@ -193,6 +232,13 @@ def create_router_blueprint(workers: List[WorkerTarget]) -> Blueprint:
         # 2. Filter and rank workers
         ranked = select_best_workers(statuses, quota_group)
         if not ranked:
+            # No eligible workers — try fallback if configured
+            if fallback_config:
+                return _try_fallback(
+                    prompt, fallback_config, quota_group, model,
+                    statuses, timeout=timeout_val
+                )
+
             return jsonify({
                 "error": "No available workers with sufficient quota",
                 "quota_group": quota_group,
@@ -247,6 +293,13 @@ def create_router_blueprint(workers: List[WorkerTarget]) -> Blueprint:
                 logger.warning(err_msg)
                 errors.append(err_msg)
                 # Fall through to try next candidate worker
+
+        # All eligible workers failed — try fallback if configured
+        if fallback_config:
+            return _try_fallback(
+                prompt, fallback_config, quota_group, model,
+                statuses, timeout=timeout_val, worker_errors=errors
+            )
 
         return jsonify({
             "error": "All eligible workers failed to process the request",

@@ -68,7 +68,10 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
 
     # Register Router mode
     if cfg.is_router:
-        router_bp = create_router_blueprint(workers=cfg.workers)
+        router_bp = create_router_blueprint(
+            workers=cfg.workers,
+            fallback_config=cfg.fallback,
+        )
         app.register_blueprint(router_bp)
         logger.info(
             "Router endpoints mounted (/router/status, /router/chat) with %d target worker(s)",
