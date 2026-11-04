@@ -361,7 +361,7 @@ class TestFallbackConfig(unittest.TestCase):
         self.assertEqual(cfg.base_url, "https://api.openai.com/v1")
         self.assertEqual(cfg.model, "gpt-4o-mini")
         self.assertEqual(cfg.timeout, 120)
-        self.assertEqual(cfg.max_tokens, 16384)
+        self.assertIsNone(cfg.max_tokens)
 
     def test_fallback_config_null_fields(self):
         """Ensure JSON with explicit null values parses with defaults without crashing."""
@@ -381,7 +381,7 @@ class TestFallbackConfig(unittest.TestCase):
         self.assertEqual(cfg.base_url, "https://api.openai.com/v1")
         self.assertEqual(cfg.model, "gpt-4o-mini")
         self.assertEqual(cfg.timeout, 120)
-        self.assertEqual(cfg.max_tokens, 16384)
+        self.assertIsNone(cfg.max_tokens)
 
 
 class TestFallbackAPI(unittest.TestCase):

@@ -132,8 +132,7 @@ sudo systemctl reload caddy
     "api_key": "sk-your-openai-api-key",
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
-    "timeout": 120,
-    "max_tokens": 16384
+    "timeout": 120
   }
 }
 ```
@@ -152,7 +151,7 @@ sudo systemctl reload caddy
 | `fallback.base_url` | `string` | Base URL (default: `https://api.openai.com/v1`). Supports Groq, Together, OpenRouter, vLLM, etc. |
 | `fallback.model` | `string` | Fallback model name (default: `gpt-4o-mini`). |
 | `fallback.timeout` | `int` | Timeout in seconds (default: `120`). |
-| `fallback.max_tokens` | `int` | Max completion tokens (default: `16384`). |
+| `fallback.max_tokens` | `int` | (Optional) Max completion tokens. If omitted, uses model's natural default. |
 
 ---
 

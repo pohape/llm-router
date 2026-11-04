@@ -11,7 +11,6 @@ logger = logging.getLogger("llm-router.fallback")
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_TIMEOUT = 120
-DEFAULT_MAX_TOKENS = 16384
 
 
 class FallbackError(Exception):
@@ -32,7 +31,7 @@ class FallbackConfig:
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
     timeout: int = DEFAULT_TIMEOUT
-    max_tokens: int = DEFAULT_MAX_TOKENS
+    max_tokens: Optional[int] = None
 
 
 def call_openai_fallback(
@@ -63,11 +62,12 @@ def call_openai_fallback(
         "Content-Type": "application/json",
         "User-Agent": "llm-router/1.0",
     }
-    payload = {
+    payload: Dict[str, Any] = {
         "model": config.model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": config.max_tokens,
     }
+    if config.max_tokens and config.max_tokens > 0:
+        payload["max_tokens"] = config.max_tokens
 
     logger.info(
         "Calling fallback API: url=%s, model=%s, prompt_len=%d, timeout=%ds",

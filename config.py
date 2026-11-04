@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fallback import (
     DEFAULT_BASE_URL,
-    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
     FallbackConfig,
@@ -148,11 +147,13 @@ def _validate_fallback_config(data: Dict[str, Any]) -> List[Tuple[str, str]]:
         results.append(("ERROR", f"'fallback.timeout' must be an integer between 1 and 600 (got: {timeout})"))
 
     raw_tokens = fallback.get("max_tokens")
-    max_tokens = DEFAULT_MAX_TOKENS if raw_tokens is None else raw_tokens
-    if isinstance(max_tokens, int) and 1 <= max_tokens <= 128000:
-        results.append(("OK", f"Fallback max_tokens: {max_tokens}"))
+    if raw_tokens is not None:
+        if isinstance(raw_tokens, int) and 1 <= raw_tokens <= 128000:
+            results.append(("OK", f"Fallback max_tokens: {raw_tokens}"))
+        else:
+            results.append(("ERROR", f"'fallback.max_tokens' must be an integer between 1 and 128000 (got: {raw_tokens})"))
     else:
-        results.append(("ERROR", f"'fallback.max_tokens' must be an integer between 1 and 128000 (got: {max_tokens})"))
+        results.append(("OK", "Fallback max_tokens: unlimited (model default)"))
 
     return results
 
@@ -335,12 +336,14 @@ def _parse_fallback_config(data: Dict[str, Any]) -> Optional[FallbackConfig]:
             timeout = DEFAULT_TIMEOUT
 
     raw_max_tokens = fallback.get("max_tokens")
-    max_tokens = DEFAULT_MAX_TOKENS
+    max_tokens = None
     if raw_max_tokens is not None:
         try:
-            max_tokens = int(raw_max_tokens)
+            val = int(raw_max_tokens)
+            if val > 0:
+                max_tokens = val
         except (ValueError, TypeError):
-            max_tokens = DEFAULT_MAX_TOKENS
+            max_tokens = None
 
     return FallbackConfig(
         api_key=api_key_val.strip(),
