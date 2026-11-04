@@ -47,7 +47,7 @@ It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS a
 
 ## Features
 
-- **Zero Heavy Dependencies**: Pure Python using only standard library, `flask`, and `requests`. No Docker or compilation required.
+- **Lightweight Dependencies**: Pure Python using only `Flask`, `Requests`, and `PyYAML`. No Docker or compilation required.
 - **Instant Limits Endpoint**: `/limits` is served straight from an in-memory cache. Quotas update automatically every 60 seconds in a background thread.
 - **Model-Aware Quota Routing**: Automatically separates Gemini models and Claude/GPT models to route against the correct quota bucket.
 - **Automatic Multi-Tier Failover**: If the top worker fails (network timeout, HTTP 5xx, or HTTP 429 quota exhaustion), the router immediately tries the next best worker in the ranked list.
@@ -368,7 +368,7 @@ When a request arrives at `/router/chat`:
 
 ## Testing
 
-Run the comprehensive test suite (48 standard library unittest tests covering configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
+Run the comprehensive test suite (52 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
 
 ```bash
 venv/bin/python test_all.py -v
