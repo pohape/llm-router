@@ -62,7 +62,7 @@ Worker 1 (llm1.example.com)      Worker 2 (llm2.example.com)
 
 ### 1. Clone repository
 ```bash
-git clone https://github.com/your-username/llm-router.git ~/GitHub/llm-router
+git clone https://github.com/pohape/llm-router.git ~/GitHub/llm-router
 cd ~/GitHub/llm-router
 ```
 
@@ -258,7 +258,7 @@ When a request arrives at `/router/chat`:
 2. **Parallel Quota Query**:
    The router queries `/limits` across all configured workers simultaneously with a 4-second timeout.
 3. **Hard Filter**:
-   Any worker with weekly quota remaining fraction $\le 0.001$ is temporarily excluded.
+   Any worker with weekly quota remaining fraction <= 0.001 (0%) is temporarily excluded.
 4. **Ranking**:
    Remaining online workers are sorted descending by their 5-hour quota fraction.
 5. **Failover**:
