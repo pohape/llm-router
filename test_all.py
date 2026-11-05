@@ -998,5 +998,63 @@ class TestExecutorModelValidation(unittest.TestCase):
             self.assertIn("Prompt cannot be empty", ctx.exception.message)
 
 
+class TestExecutorToolsDisabled(unittest.TestCase):
+    """agy always runs a tool-less custom agent from agy_workspace/."""
+
+    def _run(self, **kwargs):
+        proc = MagicMock(returncode=0, stdout='{"status":"SUCCESS","response":"ok"}', stderr="")
+        with patch("executor.subprocess.run", return_value=proc) as run:
+            result = execute_prompt(agy_binary="agy", prompt="hi", model="gemini-model", **kwargs)
+        return result, run.call_args
+
+    def test_plain_prompt_uses_text_agent_in_workspace(self):
+        import executor
+        result, call = self._run()
+        cmd = call.args[0]
+        self.assertEqual(result["response"], "ok")
+        self.assertEqual(cmd[cmd.index("--agent") + 1], executor.AGY_TEXT_AGENT)
+        self.assertNotIn("--json-schema", cmd)
+        self.assertNotIn("--dangerously-skip-permissions", cmd)
+        self.assertEqual(call.kwargs["cwd"], executor.AGY_WORKSPACE_DIR)
+
+    def test_json_schema_uses_json_agent_and_flag(self):
+        import executor
+        schema = {"type": "object", "properties": {"notes": {"type": "string"}}, "required": ["notes"]}
+        _, call = self._run(json_schema=schema)
+        cmd = call.args[0]
+        self.assertEqual(cmd[cmd.index("--agent") + 1], executor.AGY_JSON_AGENT)
+        self.assertEqual(json.loads(cmd[cmd.index("--json-schema") + 1]), schema)
+        self.assertEqual(call.kwargs["cwd"], executor.AGY_WORKSPACE_DIR)
+
+    def test_invalid_json_schema_raises_400(self):
+        for bad in ("{}", ["x"], {"type": "string"}, {}):
+            with self.assertRaises(AgyExecutionError) as ctx:
+                execute_prompt(agy_binary="agy", prompt="hi", model="gemini-model", json_schema=bad)
+            self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_agent_files_declare_no_tools(self):
+        import os
+        import executor
+        expected = {executor.AGY_TEXT_AGENT: "tools: []", executor.AGY_JSON_AGENT: "tools: [finish]"}
+        for name, tools_line in expected.items():
+            path = os.path.join(executor.AGY_WORKSPACE_DIR, ".agents", "agents", f"{name}.md")
+            with open(path, encoding="utf-8") as f:
+                frontmatter = f.read().split("---")[1]
+            lines = [line.strip() for line in frontmatter.splitlines()]
+            self.assertIn(f"name: {name}", lines)
+            self.assertIn(tools_line, lines)
+            self.assertIn("excludeDefaultComponents: true", lines)
+            self.assertIn("inheritMcp: false", lines)
+
+    def test_worker_forwards_json_schema(self):
+        app = Flask(__name__)
+        app.register_blueprint(create_worker_blueprint(tracker=MagicMock(), agy_binary="agy"))
+        schema = {"type": "object", "properties": {}}
+        with patch("worker.execute_prompt", return_value={"status": "SUCCESS"}) as ex:
+            res = app.test_client().post("/chat", json={"prompt": "p", "model": "m", "json_schema": schema})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(ex.call_args.kwargs["json_schema"], schema)
+
+
 if __name__ == "__main__":
     unittest.main()

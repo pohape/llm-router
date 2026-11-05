@@ -2,10 +2,21 @@
 
 import json
 import logging
+import os
 import subprocess
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("llm-router.executor")
+
+# agy runs inside this workspace so it finds the custom agents in
+# agy_workspace/.agents/agents/. Both agents declare no built-in tools,
+# no default components and no MCP servers, so the model never sees a
+# tool to call (no command execution, file edits, search or MCP).
+AGY_WORKSPACE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agy_workspace")
+AGY_TEXT_AGENT = "router-text"
+# --json-schema delivers the structured output through agy's `finish` tool,
+# so the structured-output agent keeps that single tool and nothing else.
+AGY_JSON_AGENT = "router-json"
 
 
 class AgyExecutionError(Exception):
@@ -62,7 +73,8 @@ def execute_prompt(
     model: str,
     output_format: str = "json",
     effort: Optional[str] = None,
-    timeout_seconds: int = 300
+    timeout_seconds: int = 300,
+    json_schema: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Execute agy CLI with the given prompt and model.
 
@@ -73,14 +85,24 @@ def execute_prompt(
     if not model or not model.strip():
         raise AgyExecutionError("Model cannot be empty", status_code=400)
 
+    if json_schema is not None and (not isinstance(json_schema, dict) or json_schema.get("type") != "object"):
+        raise AgyExecutionError(
+            "'json_schema' must be a JSON object whose root has \"type\": \"object\"",
+            status_code=400
+        )
+
     clean_model = model.strip()
 
     cmd = [
         agy_binary,
+        "--agent", AGY_JSON_AGENT if json_schema is not None else AGY_TEXT_AGENT,
         "--model", clean_model,
         "-p", prompt,
         "--output-format", output_format
     ]
+
+    if json_schema is not None:
+        cmd.extend(["--json-schema", json.dumps(json_schema)])
 
     if effort:
         clean_effort = effort.strip().lower()
@@ -95,7 +117,8 @@ def execute_prompt(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            check=False
+            check=False,
+            cwd=AGY_WORKSPACE_DIR
         )
     except subprocess.TimeoutExpired:
         logger.error("agy execution timed out after %ds", timeout_seconds)

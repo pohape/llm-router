@@ -252,6 +252,22 @@ Response:
 }
 ```
 
+#### Tools are disabled
+`agy` is an agent CLI: by default the model sees tools (terminal commands, file edits, search, MCP) and in headless mode a tool call that needs permission is auto-denied, leaving an empty `response` with `denied_actions`. The worker therefore never runs the default agent. It starts `agy` with `--agent` from the workspace `agy_workspace/`, whose custom agents (`agy_workspace/.agents/agents/*.md`, format: https://antigravity.google/docs/subagents) declare `tools: []`, `excludeDefaultComponents: true` and `inheritMcp: false`, so the model gets no tool at all and answers in text:
+
+- `router-text` — every request without `json_schema`; no tools.
+- `router-json` — requests with `json_schema`; its only tool is `finish`, through which `agy --json-schema` returns the structured output.
+
+This is not configurable. `--dangerously-skip-permissions` is never passed.
+
+#### Structured output (`json_schema`)
+Optional `json_schema` (a JSON object whose root has `"type": "object"`) is passed to `agy --json-schema`. The validated result arrives in the `structured_output` field (`response` carries the same JSON as text). Other schemas are refused with HTTP 400. The router forwards the field to workers unchanged; the OpenAI-compatible fallback ignores it.
+```bash
+curl -X POST https://llm1.example.com/chat -u admin:password -H "Content-Type: application/json" \
+  -d '{"prompt": "Suggest two MA configs", "model": "gemini-3.8-flash-low",
+       "json_schema": {"type": "object", "properties": {"notes": {"type": "string"}}, "required": ["notes"]}}'
+```
+
 ---
 
 ### 4. Router Status
@@ -378,7 +394,7 @@ When a request arrives at `/router/chat`:
 
 ## Testing
 
-Run the comprehensive test suite (58 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
+Run the comprehensive test suite (63 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
 
 ```bash
 venv/bin/python test_all.py -v

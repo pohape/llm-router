@@ -45,6 +45,7 @@ def create_worker_blueprint(tracker: LimitsTracker, agy_binary: str) -> Blueprin
         output_format = str(body.get("output_format") or "json")
         effort = str(body.get("effort")) if body.get("effort") is not None else None
         timeout = body.get("timeout", 300)
+        json_schema = body.get("json_schema")
 
         try:
             timeout_val = int(timeout)
@@ -58,7 +59,8 @@ def create_worker_blueprint(tracker: LimitsTracker, agy_binary: str) -> Blueprin
                 model=clean_model,
                 output_format=output_format,
                 effort=effort,
-                timeout_seconds=timeout_val
+                timeout_seconds=timeout_val,
+                json_schema=json_schema
             )
             return jsonify(result)
         except AgyExecutionError as e:
