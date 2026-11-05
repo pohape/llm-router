@@ -116,13 +116,19 @@ sudo systemctl reload caddy
 ## Configuration Reference (`config.yaml`)
 
 ```yaml
-is_worker: true
-is_router: false
+# Role configuration (worker, router, or hybrid)
+is_worker: false
+is_router: true
+
+# Default agy model for incoming prompts (required when is_router: true)
 default_model: gemini-3.8-flash-high
+
+# Server port and credentials
 port: 8741
 user: admin
 password: your-secure-password
 
+# Remote worker nodes (polled concurrently for quotas and load balancing)
 workers:
   - host: llm1.example.com
     user: admin
@@ -132,6 +138,7 @@ workers:
     user: admin
     password: worker2-password
 
+# Optional fallback provider (called when all workers fail or quotas are depleted)
 fallback:
   enabled: true
   api_key: sk-your-openai-api-key
@@ -386,8 +393,12 @@ venv/bin/python check_config.py
 
 ## Updating
 
+To pull the latest updates and restart the service:
+
 ```bash
+cd ~/GitHub/llm-router
 git pull
+venv/bin/pip install -r requirements.txt
 sudo systemctl restart llm-router
 ```
 
