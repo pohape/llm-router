@@ -27,6 +27,12 @@ class AgyExecutionError(Exception):
         self.details = details or {}
 
 
+# agy always reaches Google over IPv4. Google geolocates some datacenter IPv6 ranges into unsupported countries
+# (OVH hosts in DE/FR were seen as RU/IR) and the model call fails with FAILED_PRECONDITION "User location is not
+# supported"; IPv4 is located correctly. agy is a Go binary: netdns=cgo makes it use the glibc resolver, and
+# RES_OPTIONS=no-aaaa (glibc >= 2.36) makes that resolver return no IPv6 addresses.
+AGY_IPV4_ONLY_ENV = {"GODEBUG": "netdns=cgo", "RES_OPTIONS": "no-aaaa"}
+
 def extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
     """Robustly extract JSON dictionary from CLI output that may contain log lines or banners."""
     stripped = text.strip()
@@ -118,7 +124,8 @@ def execute_prompt(
             text=True,
             timeout=timeout_seconds,
             check=False,
-            cwd=AGY_WORKSPACE_DIR
+            cwd=AGY_WORKSPACE_DIR,
+            env={**os.environ, **AGY_IPV4_ONLY_ENV}
         )
     except subprocess.TimeoutExpired:
         logger.error("agy execution timed out after %ds", timeout_seconds)

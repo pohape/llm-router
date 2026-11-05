@@ -1026,6 +1026,13 @@ class TestExecutorToolsDisabled(unittest.TestCase):
         self.assertEqual(json.loads(cmd[cmd.index("--json-schema") + 1]), schema)
         self.assertEqual(call.kwargs["cwd"], executor.AGY_WORKSPACE_DIR)
 
+    def test_agy_runs_ipv4_only(self):
+        _, call = self._run()
+        env = call.kwargs["env"]
+        self.assertEqual(env["GODEBUG"], "netdns=cgo")
+        self.assertEqual(env["RES_OPTIONS"], "no-aaaa")
+        self.assertIn("PATH", env)
+
     def test_invalid_json_schema_raises_400(self):
         for bad in ("{}", ["x"], {"type": "string"}, {}):
             with self.assertRaises(AgyExecutionError) as ctx:

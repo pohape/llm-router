@@ -423,3 +423,17 @@ sudo systemctl restart llm-router
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
+
+---
+
+## IPv4 only for agy ("User location is not supported")
+
+Google decides the caller's country from the source IP with its own geolocation, and for some datacenter IPv6
+ranges it is wrong: on OVH hosts in Germany and France the IPv6 address was seen as RU and IR, so every model call
+failed with `FAILED_PRECONDITION: User location is not supported` while `/limits` still worked (the quota endpoint
+does not check the country). The same hosts are located correctly over IPv4. The worker therefore always starts agy
+with `GODEBUG=netdns=cgo` (agy is a Go binary; use the glibc resolver) and `RES_OPTIONS=no-aaaa` (glibc >= 2.36
+returns no IPv6 addresses), so agy connects over IPv4 only on every host, however the service is started
+(`executor.py`, `AGY_IPV4_ONLY_ENV`). Only the agy child process is affected; the router itself and the rest of the
+host keep IPv6. An IPv6-only host cannot run agy this way. Reports of the
+same failure: https://discuss.ai.google.dev/t/gemini-models-fail-with-user-location-is-not-supported/176552
