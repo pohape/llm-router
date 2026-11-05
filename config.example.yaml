@@ -8,6 +8,10 @@
 is_worker: true
 is_router: false
 
+# Default model used for agy routing when the incoming request does not specify one.
+# REQUIRED when is_router: true.
+default_model: gemini-3.8-flash-high
+
 # Local TCP listening port for the Flask application (default: 8741)
 # Caddy or another reverse proxy should forward external HTTPS traffic to this port.
 port: 8741

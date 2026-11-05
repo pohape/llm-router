@@ -147,8 +147,13 @@ def select_best_workers(
 
 def create_router_blueprint(
     workers: List[WorkerTarget],
+    default_model: str,
     fallback_config: Optional[FallbackConfig] = None,
 ) -> Blueprint:
+    if not default_model or not isinstance(default_model, str) or not default_model.strip():
+        raise ValueError("default_model is required and must be a non-empty string")
+
+    clean_default_model = default_model.strip()
     bp = Blueprint("router", __name__, url_prefix="/router")
 
     def _try_fallback(
@@ -204,6 +209,7 @@ def create_router_blueprint(
         return jsonify({
             "total_workers": len(workers),
             "online_workers": online_count,
+            "default_model": clean_default_model,
             "fallback_configured": fallback_config is not None,
             "fallback_model": fallback_config.model if fallback_config else None,
             "fallback_reasoning_effort": fallback_config.reasoning_effort if fallback_config else None,
@@ -220,7 +226,15 @@ def create_router_blueprint(
         if not prompt or not isinstance(prompt, str) or not prompt.strip():
             return jsonify({"error": "Missing or empty 'prompt' field in JSON body"}), 400
 
-        model = str(body.get("model") or "gemini-3.8-flash-high")
+        req_model = body.get("model")
+        if req_model and isinstance(req_model, str) and req_model.strip():
+            model = req_model.strip()
+        else:
+            model = clean_default_model
+
+        # Ensure forwarded request body explicitly includes the resolved model
+        body["model"] = model
+
         quota_group = get_model_quota_group(model)
         effort = str(body["effort"]).strip() if body.get("effort") else None
         timeout_raw = body.get("timeout", 300)

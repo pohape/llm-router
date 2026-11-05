@@ -59,7 +59,7 @@ def extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
 def execute_prompt(
     agy_binary: str,
     prompt: str,
-    model: str = "gemini-3.8-flash-high",
+    model: str,
     output_format: str = "json",
     effort: Optional[str] = None,
     timeout_seconds: int = 300
@@ -70,10 +70,14 @@ def execute_prompt(
     """
     if not prompt or not prompt.strip():
         raise AgyExecutionError("Prompt cannot be empty", status_code=400)
+    if not model or not model.strip():
+        raise AgyExecutionError("Model cannot be empty", status_code=400)
+
+    clean_model = model.strip()
 
     cmd = [
         agy_binary,
-        "--model", model,
+        "--model", clean_model,
         "-p", prompt,
         "--output-format", output_format
     ]

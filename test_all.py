@@ -9,7 +9,7 @@ from flask import Flask
 
 from auth import setup_auth
 from config import AppConfig, WorkerTarget, load_config, parse_bool, validate_config_data
-from executor import extract_json_payload
+from executor import AgyExecutionError, execute_prompt, extract_json_payload
 from fallback import (
     FallbackConfig,
     FallbackError,
@@ -55,6 +55,7 @@ class TestConfig(unittest.TestCase):
         data = {
             "is_worker": False,
             "is_router": True,
+            "default_model": "gemini-3.8-flash-high",
             "port": 8741,
             "user": "admin",
             "password": "changeme",
@@ -63,6 +64,19 @@ class TestConfig(unittest.TestCase):
         results = validate_config_data(data)
         errors = [msg for lvl, msg in results if lvl == "ERROR"]
         self.assertTrue(any("workers" in err.lower() for err in errors))
+
+    def test_validate_config_router_without_default_model(self):
+        data = {
+            "is_worker": False,
+            "is_router": True,
+            "port": 8741,
+            "user": "admin",
+            "password": "changeme",
+            "workers": [{"host": "w1.example.com", "user": "u", "password": "p"}]
+        }
+        results = validate_config_data(data)
+        errors = [msg for lvl, msg in results if lvl == "ERROR"]
+        self.assertTrue(any("default_model" in err for err in errors))
 
     def test_clean_host(self):
         w1 = WorkerTarget("https://llm1.example.com/", "u", "p")
@@ -79,6 +93,7 @@ class TestYAMLLoading(unittest.TestCase):
         yaml_content = """
 is_worker: false
 is_router: true
+default_model: gemini-3.8-flash-high
 port: 8741
 user: testuser
 password: testpass
@@ -102,6 +117,7 @@ fallback:
             self.assertTrue(cfg.is_router)
             self.assertEqual(cfg.user, "testuser")
             self.assertEqual(cfg.password, "testpass")
+            self.assertEqual(cfg.default_model, "gemini-3.8-flash-high")
             self.assertEqual(len(cfg.workers), 1)
             self.assertEqual(cfg.workers[0].clean_host, "w1.example.com")
             self.assertIsNotNone(cfg.fallback)
@@ -273,6 +289,16 @@ class TestHTTPAuthAndEndpoints(unittest.TestCase):
         res = client.post("/chat", json={"prompt": ""})
         self.assertEqual(res.status_code, 400)
 
+        # POST /chat with missing model -> 400
+        res = client.post("/chat", json={"prompt": "hello"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Missing or empty 'model'", res.get_json()["error"])
+
+        # POST /chat with empty/whitespace model -> 400
+        res = client.post("/chat", json={"prompt": "hello", "model": "   "})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Missing or empty 'model'", res.get_json()["error"])
+
     def test_extract_json_payload(self):
         # Plain json
         self.assertEqual(extract_json_payload('{"a": 1}'), {"a": 1})
@@ -291,7 +317,7 @@ AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED"}
         w1 = WorkerTarget("worker1.example.com", "u", "p")
         w2 = WorkerTarget("worker2.example.com", "u", "p")
 
-        bp = create_router_blueprint([w1, w2])
+        bp = create_router_blueprint([w1, w2], default_model="gemini-3.8-flash-high")
         app.register_blueprint(bp)
         client = app.test_client()
 
@@ -328,7 +354,7 @@ AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED"}
         w1 = WorkerTarget("worker1.example.com", "u", "p")
         w2 = WorkerTarget("worker2.example.com", "u", "p")
 
-        bp = create_router_blueprint([w1, w2])
+        bp = create_router_blueprint([w1, w2], default_model="gemini-3.8-flash-high")
         app.register_blueprint(bp)
         client = app.test_client()
 
@@ -364,6 +390,7 @@ class TestFallbackConfig(unittest.TestCase):
         data = {
             "is_worker": False, "is_router": True, "port": 8741,
             "user": "u", "password": "p",
+            "default_model": "gemini-3.8-flash-high",
             "workers": [{"host": "w.example.com", "user": "u", "password": "p"}],
             "fallback": {
                 "enabled": True,
@@ -445,6 +472,7 @@ class TestFallbackConfig(unittest.TestCase):
             data = {
                 "is_worker": False, "is_router": True, "port": 8741,
                 "user": "u", "password": "p",
+                "default_model": "gemini-3.8-flash-high",
                 "workers": [{"host": "w.example.com", "user": "u", "password": "p"}],
                 "fallback": {"enabled": True, "api_key": "sk-real-1234", "reasoning_effort": eff}
             }
@@ -456,6 +484,7 @@ class TestFallbackConfig(unittest.TestCase):
         data = {
             "is_worker": False, "is_router": True, "port": 8741,
             "user": "u", "password": "p",
+            "default_model": "gemini-3.8-flash-high",
             "workers": [{"host": "w.example.com", "user": "u", "password": "p"}],
             "fallback": {"enabled": True, "api_key": "sk-real-1234", "reasoning_effort": "extreme"}
         }
@@ -680,9 +709,9 @@ class TestRouterFallbackIntegration(unittest.TestCase):
             model="gpt-4o-mini", timeout=30, max_tokens=1024
         )
 
-    def _make_app_with_fallback(self, workers, fallback_config=None):
+    def _make_app_with_fallback(self, workers, fallback_config=None, default_model="gemini-3.8-flash-high"):
         app = Flask(__name__)
-        bp = create_router_blueprint(workers, fallback_config=fallback_config)
+        bp = create_router_blueprint(workers, default_model=default_model, fallback_config=fallback_config)
         app.register_blueprint(bp)
         return app
 
@@ -858,11 +887,11 @@ class TestRouterFallbackEdgeCases(unittest.TestCase):
     """Group D: Edge cases for fallback."""
 
     def test_router_status_with_fallback(self):
-        """D3: /router/status shows fallback_configured: true."""
+        """D3: /router/status shows fallback_configured: true and default_model."""
         w1 = WorkerTarget("w1.example.com", "u", "p")
         fb = FallbackConfig(api_key="sk-test")
         app = Flask(__name__)
-        bp = create_router_blueprint([w1], fallback_config=fb)
+        bp = create_router_blueprint([w1], default_model="gemini-3.8-flash-high", fallback_config=fb)
         app.register_blueprint(bp)
         client = app.test_client()
 
@@ -870,13 +899,15 @@ class TestRouterFallbackEdgeCases(unittest.TestCase):
         with patch("router.poll_worker_limits", return_value=s1):
             res = client.get("/router/status")
             self.assertEqual(res.status_code, 200)
-            self.assertTrue(res.get_json()["fallback_configured"])
+            data = res.get_json()
+            self.assertTrue(data["fallback_configured"])
+            self.assertEqual(data["default_model"], "gemini-3.8-flash-high")
 
     def test_router_status_without_fallback(self):
         """D4: /router/status shows fallback_configured: false."""
         w1 = WorkerTarget("w1.example.com", "u", "p")
         app = Flask(__name__)
-        bp = create_router_blueprint([w1], fallback_config=None)
+        bp = create_router_blueprint([w1], default_model="gemini-3.8-flash-high", fallback_config=None)
         app.register_blueprint(bp)
         client = app.test_client()
 
@@ -884,7 +915,87 @@ class TestRouterFallbackEdgeCases(unittest.TestCase):
         with patch("router.poll_worker_limits", return_value=s1):
             res = client.get("/router/status")
             self.assertEqual(res.status_code, 200)
-            self.assertFalse(res.get_json()["fallback_configured"])
+            data = res.get_json()
+            self.assertFalse(data["fallback_configured"])
+            self.assertEqual(data["default_model"], "gemini-3.8-flash-high")
+
+
+class TestRouterModelForwardingAndValidation(unittest.TestCase):
+    """Tests for router default_model resolution, forwarding, and validation."""
+
+    def test_create_router_blueprint_invalid_default_model(self):
+        w1 = WorkerTarget("w1.example.com", "u", "p")
+        for bad_val in (None, "", "   "):
+            with self.assertRaises(ValueError):
+                create_router_blueprint([w1], default_model=bad_val)
+
+    def test_router_injects_default_model_when_omitted(self):
+        app = Flask(__name__)
+        w1 = WorkerTarget("w1.example.com", "u", "p")
+        bp = create_router_blueprint([w1], default_model="gemini-3.8-flash-high")
+        app.register_blueprint(bp)
+        client = app.test_client()
+
+        s1 = WorkerStatus(target=w1, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=1.0)
+        forwarded_bodies = []
+
+        def mock_post(url, **kwargs):
+            forwarded_bodies.append(kwargs.get("json", {}))
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = b'{"status": "SUCCESS", "response": "ok"}'
+            mock_resp.headers = {"Content-Type": "application/json"}
+            return mock_resp
+
+        with patch("router.poll_worker_limits", return_value=s1):
+            with patch("requests.post", side_effect=mock_post):
+                res = client.post("/router/chat", json={"prompt": "test prompt without model"})
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(len(forwarded_bodies), 1)
+                self.assertEqual(forwarded_bodies[0]["model"], "gemini-3.8-flash-high")
+
+    def test_router_preserves_custom_model(self):
+        app = Flask(__name__)
+        w1 = WorkerTarget("w1.example.com", "u", "p")
+        bp = create_router_blueprint([w1], default_model="gemini-3.8-flash-high")
+        app.register_blueprint(bp)
+        client = app.test_client()
+
+        s1 = WorkerStatus(target=w1, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=1.0)
+        forwarded_bodies = []
+
+        def mock_post(url, **kwargs):
+            forwarded_bodies.append(kwargs.get("json", {}))
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = b'{"status": "SUCCESS", "response": "ok"}'
+            mock_resp.headers = {"Content-Type": "application/json"}
+            return mock_resp
+
+        with patch("router.poll_worker_limits", return_value=s1):
+            with patch("requests.post", side_effect=mock_post):
+                res = client.post("/router/chat", json={"prompt": "custom", "model": "gemini-ultra-test"})
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(len(forwarded_bodies), 1)
+                self.assertEqual(forwarded_bodies[0]["model"], "gemini-ultra-test")
+
+
+class TestExecutorModelValidation(unittest.TestCase):
+    """Tests for executor.py validation without fallback defaults."""
+
+    def test_execute_prompt_empty_model(self):
+        for bad_model in ("", "   ", None):
+            with self.assertRaises(AgyExecutionError) as ctx:
+                execute_prompt(agy_binary="/bin/echo", prompt="test", model=bad_model)
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("Model cannot be empty", ctx.exception.message)
+
+    def test_execute_prompt_empty_prompt(self):
+        for bad_prompt in ("", "   ", None):
+            with self.assertRaises(AgyExecutionError) as ctx:
+                execute_prompt(agy_binary="/bin/echo", prompt=bad_prompt, model="gemini-model")
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("Prompt cannot be empty", ctx.exception.message)
 
 
 if __name__ == "__main__":

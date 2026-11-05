@@ -68,14 +68,20 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
 
     # Register Router mode
     if cfg.is_router:
+        if not cfg.default_model:
+            logger.error("Router mode enabled, but 'default_model' is not set.")
+            sys.exit(1)
+
         router_bp = create_router_blueprint(
             workers=cfg.workers,
+            default_model=cfg.default_model,
             fallback_config=cfg.fallback,
         )
         app.register_blueprint(router_bp)
         logger.info(
-            "Router endpoints mounted (/router/status, /router/chat) with %d target worker(s)",
-            len(cfg.workers)
+            "Router endpoints mounted (/router/status, /router/chat) with %d target worker(s), default_model='%s'",
+            len(cfg.workers),
+            cfg.default_model
         )
 
     return app

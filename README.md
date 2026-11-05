@@ -118,6 +118,7 @@ sudo systemctl reload caddy
 ```yaml
 is_worker: true
 is_router: false
+default_model: gemini-3.8-flash-high
 port: 8741
 user: admin
 password: your-secure-password
@@ -146,6 +147,7 @@ fallback:
 |---|---|---|---|
 | `is_worker` | `bool` | Yes | Enables local `agy` execution and `/limits` background caching. |
 | `is_router` | `bool` | Yes | Enables `/router/status` and `/router/chat` load balancing. |
+| `default_model` | `string` | Router | Default model used for `agy` routing when the client does not specify one. **Required** when `is_router: true`. |
 | `port` | `int` | No | Local TCP port for Flask (default: `8741`). |
 | `user` | `string` | Yes | HTTP Basic Auth username for this node. |
 | `password` | `string` | Yes | HTTP Basic Auth password for this node. |
@@ -215,7 +217,7 @@ Response:
 
 ### 3. Run Prompt Directly on Worker
 `POST /chat` (Basic Auth)
-Executes `agy` locally and returns the parsed result.
+Executes `agy` locally and returns the parsed result. The `model` parameter is **strictly required**.
 ```bash
 curl -X POST https://llm1.example.com/chat \
   -u admin:password \
@@ -256,6 +258,7 @@ Response:
 {
   "total_workers": 2,
   "online_workers": 2,
+  "default_model": "gemini-3.8-flash-high",
   "fallback_configured": true,
   "fallback_model": "gpt-4o-mini",
   "fallback_reasoning_effort": "medium",
@@ -284,7 +287,7 @@ Response:
 
 ### 5. Router Load-Balanced Prompt
 `POST /router/chat` (Basic Auth)
-Automatically selects the optimal worker with the highest remaining quota for the requested model group. If workers fail or are depleted, falls back automatically to the external API.
+Automatically selects the optimal worker with the highest remaining quota for the requested model group. If the `model` field is omitted from the request body, the router automatically resolves it to the configured `default_model` before forwarding to workers. If workers fail or are depleted, falls back automatically to the external API.
 
 ```bash
 curl -X POST https://llm-router.example.com/router/chat \
@@ -368,7 +371,7 @@ When a request arrives at `/router/chat`:
 
 ## Testing
 
-Run the comprehensive test suite (52 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
+Run the comprehensive test suite (58 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
 
 ```bash
 venv/bin/python test_all.py -v

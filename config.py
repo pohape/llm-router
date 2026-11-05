@@ -49,6 +49,7 @@ class AppConfig:
     port: int
     user: str
     password: str
+    default_model: Optional[str] = None
     workers: List[WorkerTarget] = field(default_factory=list)
     fallback: Optional[FallbackConfig] = None
 
@@ -256,6 +257,15 @@ def validate_config_data(data: Dict[str, Any]) -> List[Tuple[str, str]]:
 
     # 5. Check router requirements
     if router_val:
+        default_model = data.get("default_model")
+        if not default_model or not isinstance(default_model, str) or not default_model.strip():
+            results.append((
+                "ERROR",
+                "'default_model' is required when is_router is true (e.g. 'gemini-3.8-flash-high').",
+            ))
+        else:
+            results.append(("OK", f"Router default model: '{default_model.strip()}'"))
+
         workers = data.get("workers")
         if not isinstance(workers, list) or len(workers) == 0:
             results.append((
@@ -407,12 +417,16 @@ def load_config(path: Optional[str] = None) -> AppConfig:
                     password=str(w.get("password", ""))
                 ))
 
+    raw_default_model = data.get("default_model")
+    default_model = str(raw_default_model).strip() if raw_default_model else None
+
     return AppConfig(
         is_worker=bool(parse_bool(data.get("is_worker"))),
         is_router=bool(parse_bool(data.get("is_router"))),
         port=int(data.get("port", 8741)),
         user=str(data.get("user")),
         password=str(data.get("password")),
+        default_model=default_model,
         workers=workers_list,
         fallback=_parse_fallback_config(data),
     )

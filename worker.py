@@ -37,7 +37,11 @@ def create_worker_blueprint(tracker: LimitsTracker, agy_binary: str) -> Blueprin
         if not prompt or not isinstance(prompt, str) or not prompt.strip():
             return jsonify({"error": "Missing or empty 'prompt' field in JSON body"}), 400
 
-        model = str(body.get("model") or "gemini-3.8-flash-high")
+        model = body.get("model")
+        if not model or not isinstance(model, str) or not model.strip():
+            return jsonify({"error": "Missing or empty 'model' field in JSON body"}), 400
+
+        clean_model = model.strip()
         output_format = str(body.get("output_format") or "json")
         effort = str(body.get("effort")) if body.get("effort") is not None else None
         timeout = body.get("timeout", 300)
@@ -51,7 +55,7 @@ def create_worker_blueprint(tracker: LimitsTracker, agy_binary: str) -> Blueprin
             result = execute_prompt(
                 agy_binary=agy_binary,
                 prompt=prompt,
-                model=model,
+                model=clean_model,
                 output_format=output_format,
                 effort=effort,
                 timeout_seconds=timeout_val
