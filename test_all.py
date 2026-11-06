@@ -3,9 +3,11 @@
 import base64
 import json
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 from flask import Flask
+import requests
 
 from auth import setup_auth
 from config import AppConfig, WorkerTarget, load_config, parse_bool, validate_config_data
@@ -1061,6 +1063,97 @@ class TestExecutorToolsDisabled(unittest.TestCase):
             res = app.test_client().post("/chat", json={"prompt": "p", "model": "m", "json_schema": schema})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(ex.call_args.kwargs["json_schema"], schema)
+
+class TestWorkerSpread(unittest.TestCase):
+    """The router spreads calls: fewer in flight first, never the last picked worker while another fits."""
+
+    def _make(self, statuses):
+        app = Flask(__name__)
+        bp = create_router_blueprint([s.target for s in statuses], default_model="gemini-3.8-flash-low")
+        app.register_blueprint(bp)
+        by_host = {s.target.clean_host: s for s in statuses}
+        poll = patch("router.poll_worker_limits", side_effect=lambda w, timeout=4.0: by_host[w.clean_host])
+        return app, bp, poll
+
+    @staticmethod
+    def _ok(url):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b'{"status": "SUCCESS"}'
+        resp.headers = {"Content-Type": "application/json"}
+        return resp
+
+    @staticmethod
+    def _equal_workers(n, five_hour=0.9):
+        return [
+            WorkerStatus(target=WorkerTarget(f"w{i}.example.com", "u", "p"), is_online=True,
+                         status_code=200, gemini_weekly=1.0, gemini_5h=five_hour)
+            for i in range(1, n + 1)
+        ]
+
+    def test_concurrent_calls_go_to_different_workers(self):
+        statuses = self._equal_workers(5)
+        statuses[0].gemini_5h = 0.95  # the stale quota makes w1 the best pick for every call
+        app, bp, poll = self._make(statuses)
+        barrier = threading.Barrier(3, timeout=5)
+        hosts = []
+
+        def mock_post(url, **kwargs):
+            hosts.append(url.split("//")[1].split("/")[0])
+            barrier.wait()  # all three calls are in flight at once
+            return self._ok(url)
+
+        results = []
+        with poll, patch("requests.post", side_effect=mock_post):
+            threads = [
+                threading.Thread(target=lambda: results.append(
+                    app.test_client().post("/router/chat", json={"prompt": "p"}).status_code))
+                for _ in range(3)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        self.assertEqual(results, [200, 200, 200])
+        self.assertEqual(len(set(hosts)), 3, hosts)
+
+    def test_sequential_calls_do_not_repeat_the_last_worker(self):
+        statuses = self._equal_workers(2)
+        statuses[0].gemini_5h = 0.9  # the stale quota keeps favouring w1
+        statuses[1].gemini_5h = 0.5
+        app, bp, poll = self._make(statuses)
+        client = app.test_client()
+        with poll, patch("requests.post", side_effect=lambda url, **kw: self._ok(url)):
+            routed = [client.post("/router/chat", json={"prompt": "p"}).headers["X-Routed-Worker"]
+                      for _ in range(4)]
+        self.assertEqual(routed, ["w1.example.com", "w2.example.com", "w1.example.com", "w2.example.com"])
+
+    def test_single_eligible_worker_is_used_repeatedly(self):
+        statuses = self._equal_workers(2)
+        statuses[1].gemini_weekly = 0.0
+        app, bp, poll = self._make(statuses)
+        client = app.test_client()
+        with poll, patch("requests.post", side_effect=lambda url, **kw: self._ok(url)):
+            routed = [client.post("/router/chat", json={"prompt": "p"}).headers["X-Routed-Worker"]
+                      for _ in range(3)]
+        self.assertEqual(routed, ["w1.example.com"] * 3)
+
+    def test_inflight_returns_to_zero_after_timeout(self):
+        app, bp, poll = self._make(self._equal_workers(3))
+        with poll, patch("requests.post", side_effect=requests.exceptions.Timeout("slow")):
+            res = app.test_client().post("/router/chat", json={"prompt": "p"})
+        self.assertEqual(res.status_code, 502)
+        self.assertEqual(len(res.get_json()["attempted_errors"]), 3)  # failover still tries every worker
+        self.assertEqual(bp.worker_load.inflight,
+                         {"w1.example.com": 0, "w2.example.com": 0, "w3.example.com": 0})
+
+    def test_inflight_returns_to_zero_after_unexpected_exception(self):
+        app, bp, poll = self._make(self._equal_workers(2))
+        with poll, patch("requests.post", side_effect=RuntimeError("boom")):
+            res = app.test_client().post("/router/chat", json={"prompt": "p"})
+        self.assertEqual(res.status_code, 500)
+        self.assertEqual(sum(bp.worker_load.inflight.values()), 0)
+        self.assertEqual(len(bp.worker_load.inflight), 1)
 
 
 if __name__ == "__main__":

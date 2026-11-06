@@ -37,8 +37,10 @@ fallback:
   enabled: false
   api_key: sk-your-api-key-here
   base_url: https://api.openai.com/v1
-  model: gpt-4o-mini
+  model: gpt-6-luna
   # Reasoning depth for thinking models: low, medium, or high (omit for standard models)
-  reasoning_effort: medium
-  timeout: 120
+  reasoning_effort: high
+  # Seconds; high effort answers can take minutes (up to ~200 s observed). Max 600.
+  # A request's own `timeout` (default 300) caps it.
+  timeout: 600
   # max_tokens: 16384  # Optional output token limit. Omit to use model's natural default.

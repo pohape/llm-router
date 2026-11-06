@@ -28,7 +28,7 @@ It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS a
                   llm-router (Router mode)
                    ├── 1. Polls all workers concurrently (/limits)
                    ├── 2. Filters out exhausted quotas (weekly <= 0.001)
-                   ├── 3. Selects best server (highest 5h remaining quota)
+                   ├── 3. Selects best server (fewest calls in flight, not the last pick, highest 5h quota)
                    └── 4. Proxies request with automatic failover chain
                             │
            ┌────────────────┴──────────────────────────┐
@@ -143,9 +143,9 @@ fallback:
   enabled: true
   api_key: sk-your-openai-api-key
   base_url: https://api.openai.com/v1
-  model: gpt-4o-mini
-  reasoning_effort: medium
-  timeout: 120
+  model: gpt-6-luna
+  reasoning_effort: high
+  timeout: 600   # high effort answers can take minutes (up to ~200 s observed)
 ```
 
 ### Configuration Options
@@ -165,7 +165,7 @@ fallback:
 | `fallback.base_url` | `string` | No | Base API URL (default: `https://api.openai.com/v1`). |
 | `fallback.model` | `string` | No | Fallback model name (default: `gpt-4o-mini`). |
 | `fallback.reasoning_effort` | `string` | No | Reasoning depth for thinking models: `"low"`, `"medium"`, `"high"`. Omit for standard models. |
-| `fallback.timeout` | `int` | No | HTTP request timeout in seconds (default: `120`). |
+| `fallback.timeout` | `int` | No | HTTP request timeout in seconds, 1–600 (default: `120`). A request's own `timeout` (default `300`) caps it. |
 | `fallback.max_tokens` | `int` | No | Maximum completion tokens. If omitted, uses model default. |
 
 ---
@@ -384,9 +384,9 @@ When a request arrives at `/router/chat`:
 3. **Hard Filter**:
    Any worker with a weekly quota remaining fraction `<= 0.001` (0%) is excluded.
 4. **Ranking & Load Distribution**:
-   Online workers are sorted descending by their 5-hour quota fraction. Workers with identical quota tiers are shuffled randomly to balance load evenly.
+   Quotas reach the router with a delay, so ranking by quota alone sends concurrent calls to the same worker. The router process therefore keeps, in memory and under one lock, the number of calls in flight per worker and the worker it picked last. Among eligible workers it picks by: fewer calls in flight → not the last picked worker → higher 5-hour quota (1% tiers) → random. The in-flight count is released when the call ends, whatever the outcome (success, error, timeout). A single eligible worker is used even if it was the last pick. Nothing is stored on disk: after a restart the counters start empty.
 5. **Failover Execution**:
-   The router forwards the call to the top-ranked worker. If that worker experiences a connection failure, network timeout, HTTP 5xx server error, or HTTP 429 quota error, the router automatically fails over to the next candidate in the ranked list.
+   The router forwards the call to the picked worker. If that worker experiences a connection failure, network timeout, HTTP 5xx server error, or HTTP 429 quota error, the router picks again by the same order among the workers not yet tried.
 6. **OpenAI-Compatible Fallback**:
    If no workers have sufficient weekly quota, all workers are offline, or every candidate in the failover chain returns an error, the router transparently executes the prompt via the configured fallback API provider.
 
@@ -394,7 +394,7 @@ When a request arrives at `/router/chat`:
 
 ## Testing
 
-Run the comprehensive test suite (63 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
+Run the comprehensive test suite (69 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
 
 ```bash
 venv/bin/python test_all.py -v

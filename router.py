@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 import logging
 import random
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from flask import Blueprint, Response, jsonify, request
 import requests
@@ -145,6 +146,51 @@ def select_best_workers(
     return eligible
 
 
+class WorkerLoad:
+    """In-memory view of where this router process sends calls.
+
+    Quota numbers reach the router with a delay, so several concurrent calls would all pick the
+    same worker with the highest 5h quota. Picking under one lock by (calls in flight, was the last
+    pick, 5h quota) spreads them. Nothing is persisted: after a restart the counters start empty.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.inflight: Dict[str, int] = {}
+        self.last_host: Optional[str] = None
+
+    def acquire(
+        self,
+        ranked: List[Tuple[WorkerStatus, float]],
+        tried: set,
+    ) -> Optional[Tuple[WorkerStatus, float]]:
+        """Pick the best untried candidate and count the call as in flight.
+
+        Order: fewer calls in flight, then not the last picked worker, then higher 5h quota (1 % tier).
+        Equal candidates keep the order of `ranked`, which select_best_workers shuffled.
+        """
+        with self._lock:
+            candidates = [item for item in ranked if item[0].target.clean_host not in tried]
+            if not candidates:
+                return None
+            best = min(
+                candidates,
+                key=lambda item: (
+                    self.inflight.get(item[0].target.clean_host, 0),
+                    item[0].target.clean_host == self.last_host,
+                    -round(item[1], 2),
+                ),
+            )
+            host = best[0].target.clean_host
+            self.inflight[host] = self.inflight.get(host, 0) + 1
+            self.last_host = host
+            return best
+
+    def release(self, host: str) -> None:
+        with self._lock:
+            self.inflight[host] -= 1
+
+
 def create_router_blueprint(
     workers: List[WorkerTarget],
     default_model: str,
@@ -155,6 +201,8 @@ def create_router_blueprint(
 
     clean_default_model = default_model.strip()
     bp = Blueprint("router", __name__, url_prefix="/router")
+    load = WorkerLoad()
+    bp.worker_load = load
 
     def _try_fallback(
         prompt: str,
@@ -265,8 +313,14 @@ def create_router_blueprint(
 
         # 3. Try routing to the best worker, with automatic fallback to next best on failure
         errors: List[str] = []
-        for worker_status, five_hour_rem in ranked:
+        tried: set = set()
+        while True:
+            picked = load.acquire(ranked, tried)
+            if picked is None:
+                break
+            worker_status, five_hour_rem = picked
             target = worker_status.target
+            tried.add(target.clean_host)
             chat_url = f"{target.base_url}/chat"
             logger.info(
                 "Routing request (model=%s, group=%s) to %s (5h quota: %.1f%%)",
@@ -310,6 +364,8 @@ def create_router_blueprint(
                 logger.warning(err_msg)
                 errors.append(err_msg)
                 # Fall through to try next candidate worker
+            finally:
+                load.release(target.clean_host)
 
         # All eligible workers failed — try fallback if configured
         if fallback_config:
