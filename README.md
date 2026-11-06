@@ -52,7 +52,7 @@ It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS a
 - **Model-Aware Quota Routing**: Automatically separates Gemini models and Claude/GPT models to route against the correct quota bucket.
 - **Automatic Multi-Tier Failover**: If the top worker fails (network timeout, HTTP 5xx, or HTTP 429 quota exhaustion), the router immediately tries the next best worker in the ranked list.
 - **OpenAI-Compatible Fallback**: Automatically invokes an external API (OpenAI, OpenRouter, Groq, Together, or local vLLM) when all workers are offline or exhausted.
-- **Reasoning Model Support**: Supports thinking/reasoning models (such as `o1`, `o3`, or custom reasoning models) with configurable `reasoning_effort` (`"low"`, `"medium"`, `"high"`), both statically in config and dynamically per-request.
+- **Reasoning Model Support**: Supports thinking/reasoning models (such as `o1`, `o3`, or custom reasoning models) with configurable `reasoning_effort` (`"low"`, `"medium"`, `"high"`), set in config only: a request's `effort` targets the agy model variant and is never carried over to the fallback model.
 - **Universal Response Format**: Fallback responses are normalized to match the `agy` worker schema (`response`, `status`, `conversation_id`, `duration_seconds`, `usage.input_tokens`, `usage.output_tokens`, `usage.thinking_tokens`) while preserving standard OpenAI keys (`prompt_tokens`, `completion_tokens`) for complete dual compatibility.
 - **Built-in CLI Validator**: Run `python3 check_config.py` to inspect syntax, credentials, and system environment with colored terminal output.
 - **Production Ready**: Ships with an automated systemd installer and Caddy reverse proxy configurations.
@@ -165,7 +165,7 @@ fallback:
 | `fallback.base_url` | `string` | No | Base API URL (default: `https://api.openai.com/v1`). |
 | `fallback.model` | `string` | No | Fallback model name (default: `gpt-4o-mini`). |
 | `fallback.reasoning_effort` | `string` | No | Reasoning depth for thinking models: `"low"`, `"medium"`, `"high"`. Omit for standard models. |
-| `fallback.timeout` | `int` | No | HTTP request timeout in seconds, 1–600 (default: `120`). A request's own `timeout` (default `300`) caps it. |
+| `fallback.timeout` | `int` | No | HTTP request timeout in seconds, 1–600 (default: `120`). The fallback's own budget: it is not reduced by the request's `timeout` nor by the time spent on workers. |
 | `fallback.max_tokens` | `int` | No | Maximum completion tokens. If omitted, uses model default. |
 
 ---
@@ -261,7 +261,7 @@ Response:
 This is not configurable. `--dangerously-skip-permissions` is never passed.
 
 #### Structured output (`json_schema`)
-Optional `json_schema` (a JSON object whose root has `"type": "object"`) is passed to `agy --json-schema`. The validated result arrives in the `structured_output` field (`response` carries the same JSON as text). Other schemas are refused with HTTP 400. The router forwards the field to workers unchanged; the OpenAI-compatible fallback ignores it.
+Optional `json_schema` (a JSON object whose root has `"type": "object"`) is passed to `agy --json-schema`. The validated result arrives in the `structured_output` field (`response` carries the same JSON as text). Other schemas are refused with HTTP 400. The router forwards the field to workers unchanged. The OpenAI-compatible fallback sends it as Chat Completions structured output (`response_format: {"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), with `strict: true` only when every object of the schema sets `additionalProperties: false` and lists all its properties in `required` (OpenAI's strict-mode requirement), otherwise `strict: false`; the parsed object comes back in `structured_output` the same way, and an answer that is not a JSON object is an error (HTTP 502).
 ```bash
 curl -X POST https://llm1.example.com/chat -u admin:password -H "Content-Type: application/json" \
   -d '{"prompt": "Suggest two MA configs", "model": "gemini-3.8-flash-low",
@@ -388,13 +388,15 @@ When a request arrives at `/router/chat`:
 5. **Failover Execution**:
    The router forwards the call to the picked worker. If that worker experiences a connection failure, network timeout, HTTP 5xx server error, or HTTP 429 quota error, the router picks again by the same order among the workers not yet tried.
 6. **OpenAI-Compatible Fallback**:
-   If no workers have sufficient weekly quota, all workers are offline, or every candidate in the failover chain returns an error, the router transparently executes the prompt via the configured fallback API provider.
+   If no workers have sufficient weekly quota, all workers are offline, or every candidate in the failover chain returns an error, the router transparently executes the prompt via the configured fallback API provider. The fallback uses `fallback.reasoning_effort` and `fallback.timeout` from config, whatever the request says.
+7. **Time budget**:
+   The request's `timeout` (default `300` s) bounds each worker attempt; workers are tried one after another. The fallback then gets `fallback.timeout` in full. Worst case of one `/router/chat` call: `4 s (limits poll) + eligible_workers × timeout + fallback.timeout`; with 5 workers, `timeout: 600` and `fallback.timeout: 600` that is 4 + 3000 + 600 = 3604 s. A client's HTTP timeout must be at least that sum.
 
 ---
 
 ## Testing
 
-Run the comprehensive test suite (69 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
+Run the comprehensive test suite (72 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
 
 ```bash
 venv/bin/python test_all.py -v

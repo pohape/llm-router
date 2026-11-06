@@ -1,5 +1,6 @@
 """OpenAI-compatible API fallback for when all workers are unavailable."""
 
+import json
 import logging
 import time
 import uuid
@@ -79,9 +80,18 @@ def normalize_usage(raw_usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         except (ValueError, TypeError):
             reasoning_tokens = 0
 
+    cached_tokens = 0
+    prompt_details = raw_usage.get("prompt_tokens_details")
+    if isinstance(prompt_details, dict):
+        try:
+            cached_tokens = int(prompt_details.get("cached_tokens") or 0)
+        except (ValueError, TypeError):
+            cached_tokens = 0
+
     return {
         # agy / Google Antigravity compatible keys
         "input_tokens": prompt_tokens,
+        "cache_read_tokens": cached_tokens,
         "output_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "thinking_tokens": reasoning_tokens,
@@ -91,19 +101,40 @@ def normalize_usage(raw_usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def schema_is_strict_compatible(schema: Any) -> bool:
+    """OpenAI strict structured output needs every object to list all its properties in `required`
+    and to set `additionalProperties: false`. Schemas that do not are sent with strict: false."""
+    if isinstance(schema, list):
+        return all(schema_is_strict_compatible(item) for item in schema)
+    if not isinstance(schema, dict):
+        return True
+    if schema.get("type") == "object":
+        props = schema.get("properties") or {}
+        if schema.get("additionalProperties") is not False or set(schema.get("required") or []) != set(props):
+            return False
+    nested = [v for k, v in schema.items() if k in ("properties", "$defs", "definitions")]
+    children = [c for group in nested if isinstance(group, dict) for c in group.values()]
+    children += [schema[k] for k in ("items", "anyOf", "oneOf", "allOf") if k in schema]
+    return all(schema_is_strict_compatible(c) for c in children)
+
+
 def call_openai_fallback(
     prompt: str,
     config: FallbackConfig,
-    timeout: Optional[int] = None,
-    effort: Optional[str] = None,
+    json_schema: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call OpenAI-compatible chat completions API as a fallback.
 
     Args:
         prompt: The user prompt to send.
         config: Fallback configuration with API key, base URL, model, etc.
-        timeout: Optional request-specific timeout in seconds (capped by config.timeout).
-        effort: Optional request-specific reasoning effort ('low', 'medium', 'high').
+        json_schema: Optional JSON schema of the answer (the same field the agy worker takes); sent as
+            structured output, the parsed object comes back in `structured_output`.
+
+    The timeout is config.timeout in full: the fallback has its own time budget, independent of the
+    request's `timeout` (which bounds each worker attempt) and of the time already spent on workers.
+    Reasoning effort comes only from config: a request's effort targets the agy model variant
+    and never carries over to the fallback model.
 
     Returns:
         Response dict in universal format matching agy worker responses.
@@ -112,16 +143,9 @@ def call_openai_fallback(
         FallbackError: If the API call fails for any reason.
     """
     effective_timeout = config.timeout
-    if timeout is not None and isinstance(timeout, (int, float)) and timeout > 0:
-        effective_timeout = min(config.timeout, int(timeout))
 
-    # Resolve reasoning effort: dynamic request override takes precedence over config
     effective_effort: Optional[str] = None
-    if effort and isinstance(effort, str):
-        clean_effort = effort.strip().lower()
-        if clean_effort in VALID_REASONING_EFFORTS:
-            effective_effort = clean_effort
-    if not effective_effort and config.reasoning_effort:
+    if config.reasoning_effort:
         clean_cfg = config.reasoning_effort.strip().lower()
         if clean_cfg in VALID_REASONING_EFFORTS:
             effective_effort = clean_cfg
@@ -141,6 +165,16 @@ def call_openai_fallback(
 
     if effective_effort:
         payload["reasoning_effort"] = effective_effort
+
+    if json_schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "response",
+                "schema": json_schema,
+                "strict": schema_is_strict_compatible(json_schema),
+            },
+        }
 
     logger.info(
         "Calling fallback API: url=%s, model=%s, prompt_len=%d, timeout=%ds, effort=%s",
@@ -206,6 +240,18 @@ def call_openai_fallback(
             details={"raw_response": data}
         )
 
+    structured_output = None
+    if json_schema is not None:
+        try:
+            structured_output = json.loads(content)
+        except ValueError:
+            structured_output = None
+        if not isinstance(structured_output, dict):
+            raise FallbackError(
+                f"Fallback API did not return a JSON object for json_schema: {content[:200]!r}",
+                status_code=502,
+            )
+
     conv_id = str(data.get("id") or uuid.uuid4())
     normalized_usage = normalize_usage(data.get("usage"))
 
@@ -217,7 +263,7 @@ def call_openai_fallback(
         normalized_usage["thinking_tokens"]
     )
 
-    return {
+    result: Dict[str, Any] = {
         "status": "SUCCESS",
         "response": content,
         "conversation_id": conv_id,
@@ -226,3 +272,6 @@ def call_openai_fallback(
         "source": "openai-fallback",
         "usage": normalized_usage,
     }
+    if structured_output is not None:
+        result["structured_output"] = structured_output
+    return result

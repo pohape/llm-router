@@ -17,6 +17,7 @@ from fallback import (
     FallbackError,
     call_openai_fallback,
     normalize_usage,
+    schema_is_strict_compatible,
 )
 from limiter import LimitsTracker, parse_quota_data
 from router import (
@@ -657,18 +658,6 @@ class TestFallbackAPI(unittest.TestCase):
         self.assertEqual(result["status"], "SUCCESS")
         self.assertEqual(result["response"], "")
 
-    def test_openai_fallback_effective_timeout(self):
-        """Check that request-specific timeout caps fallback timeout."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content": "ok"}}],
-            "model": "gpt-4o-mini"
-        }
-        with patch("fallback.requests.post", return_value=mock_resp) as mock_post:
-            call_openai_fallback("test", self._make_config(), timeout=15)
-            self.assertEqual(mock_post.call_args.kwargs["timeout"], 15)
-
     def test_fallback_utf8_cyrillic(self):
         """Russian prompt and Russian response preserve Unicode properly."""
         mock_resp = MagicMock()
@@ -690,16 +679,6 @@ class TestFallbackAPI(unittest.TestCase):
             call_openai_fallback("test", cfg)
             payload = mock_post.call_args.kwargs["json"]
             self.assertEqual(payload.get("reasoning_effort"), "high")
-
-    def test_openai_fallback_reasoning_effort_dynamic_override(self):
-        cfg = FallbackConfig(api_key="sk-test", reasoning_effort="medium")
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
-        with patch("fallback.requests.post", return_value=mock_resp) as mock_post:
-            call_openai_fallback("test", cfg, effort="low")
-            payload = mock_post.call_args.kwargs["json"]
-            self.assertEqual(payload.get("reasoning_effort"), "low")
 
 
 class TestRouterFallbackIntegration(unittest.TestCase):
@@ -1154,6 +1133,86 @@ class TestWorkerSpread(unittest.TestCase):
         self.assertEqual(res.status_code, 500)
         self.assertEqual(sum(bp.worker_load.inflight.values()), 0)
         self.assertEqual(len(bp.worker_load.inflight), 1)
+
+class TestRouterFallbackShape(unittest.TestCase):
+    """The fallback answers like a worker: json_schema in, structured_output out, own effort and time budget."""
+
+    SCHEMA = {"type": "object", "additionalProperties": False, "required": ["configs", "notes"],
+              "properties": {"configs": {"type": "array", "items": {
+                  "type": "object", "additionalProperties": False, "required": ["a"],
+                  "properties": {"a": {"type": "number"}}}},
+                  "notes": {"type": "string"}}}
+
+    def _call(self, body):
+        w1 = WorkerTarget("w1.example.com", "u", "p")
+        fb = FallbackConfig(api_key="sk-test", model="gpt-6-luna", reasoning_effort="high", timeout=600)
+        app = Flask(__name__)
+        app.register_blueprint(create_router_blueprint([w1], default_model="gemini-3.8-flash-low",
+                                                       fallback_config=fb))
+        status = WorkerStatus(target=w1, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=1.0)
+        calls = []
+
+        def mock_post(url, **kwargs):
+            calls.append((url, kwargs))
+            if "w1.example.com" in url:
+                raise requests.exceptions.Timeout("worker too slow")
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "id": "chatcmpl-1", "model": "gpt-6-luna",
+                "choices": [{"message": {"content": '{"configs": [{"a": 1}], "notes": "n"}'}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5,
+                          "prompt_tokens_details": {"cached_tokens": 4}},
+            }
+            return resp
+
+        with patch("router.poll_worker_limits", return_value=status), \
+                patch("requests.post", side_effect=mock_post):
+            res = app.test_client().post("/router/chat", json=body)
+        fallback_calls = [kw for url, kw in calls if "openai.com" in url]
+        self.assertEqual(len(fallback_calls), 1)
+        return res, fallback_calls[0]
+
+    def test_json_schema_reaches_openai_and_structured_output_returns(self):
+        res, call = self._call({"prompt": "p", "model": "gemini-3.8-flash-medium", "json_schema": self.SCHEMA})
+        self.assertEqual(call["json"]["response_format"], {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": self.SCHEMA, "strict": True}})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
+        data = res.get_json()
+        self.assertEqual(data["structured_output"], {"configs": [{"a": 1}], "notes": "n"})
+        self.assertEqual(data["usage"]["cache_read_tokens"], 4)
+
+    def test_fallback_effort_is_config_high_for_gemini_medium(self):
+        res, call = self._call({"prompt": "p", "model": "gemini-3.8-flash-medium", "effort": "medium"})
+        self.assertEqual(call["json"]["reasoning_effort"], "high")
+        self.assertEqual(call["json"]["model"], "gpt-6-luna")
+
+    def test_fallback_gets_its_own_full_timeout(self):
+        res, call = self._call({"prompt": "p", "model": "gemini-3.8-flash-medium", "timeout": 30})
+        self.assertEqual(call["timeout"], 600)
+
+    def test_non_strict_schema_is_sent_with_strict_false(self):
+        loose = {"type": "object", "properties": {"notes": {"type": "string"}, "x": {"type": "number"}},
+                 "required": ["notes"]}
+        self.assertFalse(schema_is_strict_compatible(loose))
+        self.assertTrue(schema_is_strict_compatible(self.SCHEMA))
+        nested_loose = {"type": "object", "additionalProperties": False, "required": ["c"],
+                        "properties": {"c": {"type": "array", "items": {"type": "object",
+                                                                        "properties": {"a": {}}}}}}
+        self.assertFalse(schema_is_strict_compatible(nested_loose))
+        res, call = self._call({"prompt": "p", "model": "gemini-3.8-flash-low", "json_schema": loose})
+        self.assertFalse(call["json"]["response_format"]["json_schema"]["strict"])
+
+    def test_non_json_answer_to_json_schema_is_an_error(self):
+        cfg = FallbackConfig(api_key="sk-test")
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"choices": [{"message": {"content": "not json"}}]}
+        with patch("fallback.requests.post", return_value=resp):
+            with self.assertRaises(FallbackError):
+                call_openai_fallback("p", cfg, json_schema=self.SCHEMA)
 
 
 if __name__ == "__main__":

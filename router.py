@@ -210,17 +210,16 @@ def create_router_blueprint(
         quota_group: str,
         model: str,
         statuses: List[WorkerStatus],
-        timeout: Optional[int] = None,
-        effort: Optional[str] = None,
+        json_schema: Optional[Dict[str, Any]] = None,
         worker_errors: Optional[List[str]] = None,
     ):
         """Attempt OpenAI-compatible fallback API call and return Flask response."""
         logger.info(
             "All workers exhausted/failed for group=%s, attempting fallback API (effort=%s)",
-            quota_group, effort or fb_config.reasoning_effort
+            quota_group, fb_config.reasoning_effort
         )
         try:
-            result = call_openai_fallback(prompt, fb_config, timeout=timeout, effort=effort)
+            result = call_openai_fallback(prompt, fb_config, json_schema=json_schema)
             flask_resp = jsonify(result)
             flask_resp.headers["X-Routed-Worker"] = "openai-fallback"
             flask_resp.headers["X-Routed-Model-Group"] = "fallback"
@@ -284,7 +283,7 @@ def create_router_blueprint(
         body["model"] = model
 
         quota_group = get_model_quota_group(model)
-        effort = str(body["effort"]).strip() if body.get("effort") else None
+        json_schema = body.get("json_schema")
         timeout_raw = body.get("timeout", 300)
         try:
             timeout_val = int(timeout_raw)
@@ -301,7 +300,7 @@ def create_router_blueprint(
             if fallback_config:
                 return _try_fallback(
                     prompt, fallback_config, quota_group, model,
-                    statuses, timeout=timeout_val, effort=effort
+                    statuses, json_schema=json_schema
                 )
 
             return jsonify({
@@ -371,7 +370,7 @@ def create_router_blueprint(
         if fallback_config:
             return _try_fallback(
                 prompt, fallback_config, quota_group, model,
-                statuses, timeout=timeout_val, effort=effort, worker_errors=errors
+                statuses, json_schema=json_schema, worker_errors=errors
             )
 
         return jsonify({
