@@ -150,14 +150,13 @@ class WorkerLoad:
     """In-memory view of where this router process sends calls.
 
     Quota numbers reach the router with a delay, so several concurrent calls would all pick the
-    same worker with the highest 5h quota. Picking under one lock by (calls in flight, was the last
-    pick, 5h quota) spreads them. Nothing is persisted: after a restart the counters start empty.
+    same worker with the highest 5h quota. Picking under one lock by (calls in flight, 5h quota)
+    spreads them. Nothing is persisted: after a restart the counters start empty.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.inflight: Dict[str, int] = {}
-        self.last_host: Optional[str] = None
 
     def acquire(
         self,
@@ -166,7 +165,7 @@ class WorkerLoad:
     ) -> Optional[Tuple[WorkerStatus, float]]:
         """Pick the best untried candidate and count the call as in flight.
 
-        Order: fewer calls in flight, then not the last picked worker, then higher 5h quota (1 % tier).
+        Order: fewer calls in flight, then higher 5h quota (1 % tier).
         Equal candidates keep the order of `ranked`, which select_best_workers shuffled.
         """
         with self._lock:
@@ -177,13 +176,11 @@ class WorkerLoad:
                 candidates,
                 key=lambda item: (
                     self.inflight.get(item[0].target.clean_host, 0),
-                    item[0].target.clean_host == self.last_host,
                     -round(item[1], 2),
                 ),
             )
             host = best[0].target.clean_host
             self.inflight[host] = self.inflight.get(host, 0) + 1
-            self.last_host = host
             return best
 
     def release(self, host: str) -> None:

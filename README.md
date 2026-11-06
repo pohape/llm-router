@@ -28,7 +28,7 @@ It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS a
                   llm-router (Router mode)
                    ├── 1. Polls all workers concurrently (/limits)
                    ├── 2. Filters out exhausted quotas (weekly <= 0.001)
-                   ├── 3. Selects best server (fewest calls in flight, not the last pick, highest 5h quota)
+                   ├── 3. Selects best server (fewest calls in flight, then highest 5h quota)
                    └── 4. Proxies request with automatic failover chain
                             │
            ┌────────────────┴──────────────────────────┐
@@ -384,7 +384,7 @@ When a request arrives at `/router/chat`:
 3. **Hard Filter**:
    Any worker with a weekly quota remaining fraction `<= 0.001` (0%) is excluded.
 4. **Ranking & Load Distribution**:
-   Quotas reach the router with a delay, so ranking by quota alone sends concurrent calls to the same worker. The router process therefore keeps, in memory and under one lock, the number of calls in flight per worker and the worker it picked last. Among eligible workers it picks by: fewer calls in flight → not the last picked worker → higher 5-hour quota (1% tiers) → random. The in-flight count is released when the call ends, whatever the outcome (success, error, timeout). A single eligible worker is used even if it was the last pick. Nothing is stored on disk: after a restart the counters start empty.
+   Quotas reach the router with a delay, so ranking by quota alone sends concurrent calls to the same worker. The router process therefore keeps, in memory and under one lock, the number of calls in flight per worker. Among eligible workers it picks by: fewer calls in flight → higher 5-hour quota (1% tiers) → random. The in-flight count is released when the call ends, whatever the outcome (success, error, timeout). Nothing is stored on disk: after a restart the counters start empty.
 5. **Failover Execution**:
    The router forwards the call to the picked worker. If that worker experiences a connection failure, network timeout, HTTP 5xx server error, or HTTP 429 quota error, the router picks again by the same order among the workers not yet tried.
 6. **OpenAI-Compatible Fallback**:

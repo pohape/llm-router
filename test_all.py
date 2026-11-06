@@ -1044,7 +1044,7 @@ class TestExecutorToolsDisabled(unittest.TestCase):
         self.assertEqual(ex.call_args.kwargs["json_schema"], schema)
 
 class TestWorkerSpread(unittest.TestCase):
-    """The router spreads calls: fewer in flight first, never the last picked worker while another fits."""
+    """The router spreads calls: fewer calls in flight first, then the higher 5h quota."""
 
     def _make(self, statuses):
         app = Flask(__name__)
@@ -1096,16 +1096,16 @@ class TestWorkerSpread(unittest.TestCase):
         self.assertEqual(results, [200, 200, 200])
         self.assertEqual(len(set(hosts)), 3, hosts)
 
-    def test_sequential_calls_do_not_repeat_the_last_worker(self):
+    def test_without_calls_in_flight_the_higher_quota_wins(self):
         statuses = self._equal_workers(2)
-        statuses[0].gemini_5h = 0.9  # the stale quota keeps favouring w1
+        statuses[0].gemini_5h = 0.9
         statuses[1].gemini_5h = 0.5
         app, bp, poll = self._make(statuses)
         client = app.test_client()
         with poll, patch("requests.post", side_effect=lambda url, **kw: self._ok(url)):
             routed = [client.post("/router/chat", json={"prompt": "p"}).headers["X-Routed-Worker"]
-                      for _ in range(4)]
-        self.assertEqual(routed, ["w1.example.com", "w2.example.com", "w1.example.com", "w2.example.com"])
+                      for _ in range(3)]
+        self.assertEqual(routed, ["w1.example.com"] * 3)
 
     def test_single_eligible_worker_is_used_repeatedly(self):
         statuses = self._equal_workers(2)
