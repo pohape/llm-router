@@ -1193,7 +1193,7 @@ class TestRouterFallbackShape(unittest.TestCase):
         res, call = self._call({"prompt": "p", "model": "gemini-3.8-flash-medium", "timeout": 30})
         self.assertEqual(call["timeout"], 600)
 
-    def test_non_strict_schema_is_sent_with_strict_false(self):
+    def test_non_strict_schema_is_refused_before_any_call(self):
         loose = {"type": "object", "properties": {"notes": {"type": "string"}, "x": {"type": "number"}},
                  "required": ["notes"]}
         self.assertFalse(schema_is_strict_compatible(loose))
@@ -1202,8 +1202,20 @@ class TestRouterFallbackShape(unittest.TestCase):
                         "properties": {"c": {"type": "array", "items": {"type": "object",
                                                                         "properties": {"a": {}}}}}}
         self.assertFalse(schema_is_strict_compatible(nested_loose))
-        res, call = self._call({"prompt": "p", "model": "gemini-3.8-flash-low", "json_schema": loose})
-        self.assertFalse(call["json"]["response_format"]["json_schema"]["strict"])
+        app = Flask(__name__)
+        app.register_blueprint(create_router_blueprint([WorkerTarget("w1.example.com", "u", "p")],
+                                                       default_model="gemini-3.8-flash-low",
+                                                       fallback_config=FallbackConfig(api_key="sk-test")))
+        with patch("requests.post") as post, patch("router.poll_worker_limits") as poll:
+            res = app.test_client().post("/router/chat", json={"prompt": "p", "json_schema": loose})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("strict", res.get_json()["error"])
+        post.assert_not_called()
+        poll.assert_not_called()
+
+    def test_strict_schema_is_always_sent_strict(self):
+        res, call = self._call({"prompt": "p", "json_schema": self.SCHEMA})
+        self.assertIs(call["json"]["response_format"]["json_schema"]["strict"], True)
 
     def test_non_json_answer_to_json_schema_is_an_error(self):
         cfg = FallbackConfig(api_key="sk-test")

@@ -103,7 +103,8 @@ def normalize_usage(raw_usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def schema_is_strict_compatible(schema: Any) -> bool:
     """OpenAI strict structured output needs every object to list all its properties in `required`
-    and to set `additionalProperties: false`. Schemas that do not are sent with strict: false."""
+    and to set `additionalProperties: false`. The router refuses any other schema (HTTP 400), so the
+    fallback always sends strict: true and its answer is guaranteed to match the schema."""
     if isinstance(schema, list):
         return all(schema_is_strict_compatible(item) for item in schema)
     if not isinstance(schema, dict):
@@ -172,7 +173,7 @@ def call_openai_fallback(
             "json_schema": {
                 "name": "response",
                 "schema": json_schema,
-                "strict": schema_is_strict_compatible(json_schema),
+                "strict": True,
             },
         }
 

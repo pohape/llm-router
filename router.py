@@ -11,7 +11,7 @@ from flask import Blueprint, Response, jsonify, request
 import requests
 
 from config import WorkerTarget
-from fallback import FallbackConfig, FallbackError, call_openai_fallback
+from fallback import FallbackConfig, FallbackError, call_openai_fallback, schema_is_strict_compatible
 
 logger = logging.getLogger("llm-router.router")
 
@@ -284,6 +284,9 @@ def create_router_blueprint(
 
         quota_group = get_model_quota_group(model)
         json_schema = body.get("json_schema")
+        if json_schema is not None and not schema_is_strict_compatible(json_schema):
+            return jsonify({"error": "'json_schema' must be strict: every object sets "
+                                     "\"additionalProperties\": false and lists all its properties in \"required\""}), 400
         timeout_raw = body.get("timeout", 300)
         try:
             timeout_val = int(timeout_raw)
