@@ -1227,5 +1227,154 @@ class TestRouterFallbackShape(unittest.TestCase):
                 call_openai_fallback("p", cfg, json_schema=self.SCHEMA)
 
 
+class TestWorkerEmptyStructuredOutput(unittest.TestCase):
+    """A 2xx worker answer without a structured_output the schema accepts is a refusal of that worker."""
+
+    SCHEMA = TestRouterFallbackShape.SCHEMA
+    GOOD = {"configs": [{"a": 1}], "notes": "n"}
+
+    def _run(self, answers, body=None, fallback=True):
+        """answers: host -> worker JSON body (HTTP 200). w1 has the highest 5h quota, then w2, w3."""
+        statuses = [
+            WorkerStatus(target=WorkerTarget(f"w{i}.example.com", "u", "p"), is_online=True,
+                         status_code=200, gemini_weekly=1.0, gemini_5h=1.0 - i / 10)
+            for i in range(1, len(answers) + 1)
+        ]
+        by_host = {s.target.clean_host: s for s in statuses}
+        fb = FallbackConfig(api_key="sk-test", model="gpt-6-luna", reasoning_effort="high", timeout=600)
+        app = Flask(__name__)
+        bp = create_router_blueprint([s.target for s in statuses], default_model="gemini-3.8-flash-low",
+                                     fallback_config=fb if fallback else None)
+        app.register_blueprint(bp)
+        posted = []
+
+        def mock_post(url, **kwargs):
+            host = url.split("//")[1].split("/")[0]
+            posted.append(host)
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.content = json.dumps(answers[host]).encode()
+            resp.headers = {"Content-Type": "application/json"}
+            return resp
+
+        fb_result = {"status": "SUCCESS", "source": "openai-fallback", "structured_output": self.GOOD}
+        with patch("router.poll_worker_limits", side_effect=lambda w, timeout=4.0: by_host[w.clean_host]), \
+                patch("requests.post", side_effect=mock_post), \
+                patch("router.call_openai_fallback", return_value=fb_result) as fb_mock, \
+                self.assertLogs("llm-router.router", level="INFO") as logs:
+            res = app.test_client().post("/router/chat", json=body or {"prompt": "p", "json_schema": self.SCHEMA})
+        self.assertEqual(sum(bp.worker_load.inflight.values()), 0)
+        refusals = [line for line in logs.output if "without a usable answer" in line]
+        return res, posted, fb_mock, refusals
+
+    def test_empty_success_goes_to_the_next_worker(self):
+        res, posted, fb_mock, refusals = self._run({
+            "w1.example.com": {"status": "SUCCESS", "response": ""},
+            "w2.example.com": {"status": "SUCCESS", "structured_output": self.GOOD},
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers["X-Routed-Worker"], "w2.example.com")
+        self.assertEqual(res.get_json()["structured_output"], self.GOOD)
+        self.assertEqual(posted, ["w1.example.com", "w2.example.com"])
+        fb_mock.assert_not_called()
+        self.assertEqual(len(refusals), 1)
+        self.assertIn("w1.example.com", refusals[0])
+        self.assertIn("'SUCCESS'", refusals[0])
+        self.assertIn("no structured_output", refusals[0])
+
+    def test_all_workers_empty_success_goes_to_fallback(self):
+        empty = {"status": "SUCCESS", "response": ""}
+        res, posted, fb_mock, refusals = self._run(
+            {"w1.example.com": empty, "w2.example.com": empty, "w3.example.com": empty})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
+        self.assertEqual(sorted(posted), ["w1.example.com", "w2.example.com", "w3.example.com"])
+        fb_mock.assert_called_once()
+        self.assertEqual(fb_mock.call_args.kwargs["json_schema"], self.SCHEMA)
+        self.assertEqual(len(refusals), 3)
+
+    def test_structured_output_failing_the_schema_goes_to_the_next_worker(self):
+        res, posted, fb_mock, refusals = self._run({
+            "w1.example.com": {"status": "SUCCESS", "structured_output": {"configs": [{"a": "x"}], "notes": "n"}},
+            "w2.example.com": {"status": "SUCCESS", "structured_output": self.GOOD},
+        })
+        self.assertEqual(res.headers["X-Routed-Worker"], "w2.example.com")
+        fb_mock.assert_not_called()
+        self.assertIn("fails json_schema at configs/0/a", refusals[0])
+
+    def test_all_workers_empty_without_fallback_is_502(self):
+        empty = {"status": "SUCCESS"}
+        res, posted, fb_mock, refusals = self._run(
+            {"w1.example.com": empty, "w2.example.com": empty}, fallback=False)
+        self.assertEqual(res.status_code, 502)
+        self.assertEqual(len(res.get_json()["attempted_errors"]), 2)
+        self.assertEqual(len(posted), 2)
+
+    def test_text_request_without_schema_is_unchanged(self):
+        res, posted, fb_mock, refusals = self._run(
+            {"w1.example.com": {"status": "SUCCESS", "response": "text"},
+             "w2.example.com": {"status": "SUCCESS", "response": "other"}},
+            body={"prompt": "p"})
+        self.assertEqual(res.headers["X-Routed-Worker"], "w1.example.com")
+        self.assertEqual(posted, ["w1.example.com"])
+        self.assertEqual(refusals, [])
+
+    def test_invalid_json_schema_is_refused_before_any_call(self):
+        bad = {"type": "object", "additionalProperties": False, "required": [], "properties": {}, "minProperties": "x"}
+        self.assertTrue(schema_is_strict_compatible(bad))
+        app = Flask(__name__)
+        app.register_blueprint(create_router_blueprint([WorkerTarget("w1.example.com", "u", "p")],
+                                                       default_model="gemini-3.8-flash-low"))
+        with patch("requests.post") as post, patch("router.poll_worker_limits") as poll:
+            res = app.test_client().post("/router/chat", json={"prompt": "p", "json_schema": bad})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("not a valid JSON Schema", res.get_json()["error"])
+        post.assert_not_called()
+        poll.assert_not_called()
+
+    def test_unresolvable_ref_is_refused_before_any_call(self):
+        app = Flask(__name__)
+        app.register_blueprint(create_router_blueprint([WorkerTarget("w1.example.com", "u", "p")],
+                                                       default_model="gemini-3.8-flash-low"))
+        for ref in ("#/$defs/nope", "https://example.com/schema.json", "#/anyOf/x",
+                    "urn:llm-router:request#/$defs/n"):
+            bad = {"type": "object", "additionalProperties": False, "required": ["x"],
+                   "properties": {"x": {"$ref": ref}}, "anyOf": [{"type": "object", "additionalProperties": False, "required": [], "properties": {}}],
+                   "$defs": {"n": {"type": "number"}}}
+            with patch("requests.post") as post, patch("router.poll_worker_limits") as poll:
+                res = app.test_client().post("/router/chat", json={"prompt": "p", "json_schema": bad})
+            self.assertEqual(res.status_code, 400, ref)
+            self.assertIn("$ref", res.get_json()["error"])
+            post.assert_not_called()
+            poll.assert_not_called()
+
+    def test_resolvable_ref_validates_the_answer(self):
+        schema = {"type": "object", "additionalProperties": False, "required": ["x"],
+                  "properties": {"x": {"$ref": "#/$defs/num"}}, "$defs": {"num": {"type": "number"}}}
+        res, posted, fb_mock, refusals = self._run({
+            "w1.example.com": {"status": "SUCCESS", "structured_output": {"x": "str"}},
+            "w2.example.com": {"status": "SUCCESS", "structured_output": {"x": 2}},
+        }, body={"prompt": "p", "json_schema": schema})
+        self.assertEqual(res.headers["X-Routed-Worker"], "w2.example.com")
+        self.assertIn("fails json_schema at x", refusals[0])
+
+    def test_schema_that_breaks_validation_is_a_refusal_not_500(self):
+        schema = {"type": "object", "additionalProperties": False, "required": ["x"],
+                  "properties": {"x": {"$ref": "#/required"}}}
+        res, posted, fb_mock, refusals = self._run({
+            "w1.example.com": {"status": "SUCCESS", "structured_output": {"x": 1}},
+            "w2.example.com": {"status": "SUCCESS", "structured_output": {"x": 1}},
+        }, body={"prompt": "p", "json_schema": schema})
+        self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
+        self.assertEqual(len(refusals), 2)
+        self.assertIn("json_schema validation failed", refusals[0])
+
+    def test_deeply_nested_worker_body_is_a_refusal(self):
+        from router import structured_output_refusal
+        from jsonschema import Draft202012Validator
+        status, reason = structured_output_refusal(b"[" * 200000, Draft202012Validator(self.SCHEMA))
+        self.assertEqual(reason, "body is not JSON")
+
+
 if __name__ == "__main__":
     unittest.main()

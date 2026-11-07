@@ -8,6 +8,11 @@ import random
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 from flask import Blueprint, Response, jsonify, request
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, best_match
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 import requests
 
 from config import WorkerTarget
@@ -144,6 +149,53 @@ def select_best_workers(
     # Sort descending by 5-hour quota rounded to 2 decimals (1% tier)
     eligible.sort(key=lambda item: round(item[1], 2), reverse=True)
     return eligible
+
+
+def unresolvable_ref(schema: Any) -> Optional[str]:
+    """The first `$ref` of the schema that cannot be resolved inside the schema itself (None = all resolve).
+
+    Validation raises on such a ref only when it meets an answer, so the request is refused before any call."""
+    resolver = Registry().with_resource(
+        "", Resource.from_contents(schema, default_specification=DRAFT202012)
+    ).resolver()
+    stack = [schema]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                try:
+                    resolver.lookup(ref)
+                except (Unresolvable, ValueError, LookupError, TypeError):
+                    return ref
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return None
+
+
+def structured_output_refusal(content: bytes, validator: Draft202012Validator) -> Tuple[Any, Optional[str]]:
+    """(worker's `status` field, why its 2xx answer to a json_schema request is not an answer — None if it is one).
+
+    The answer counts only with a `structured_output` that the request's schema accepts; anything else
+    is a refusal of that worker, the same as an HTTP or network failure."""
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError, RecursionError):
+        return None, "body is not JSON"
+    if not isinstance(data, dict):
+        return None, "body is not a JSON object"
+    status = data.get("status")
+    if data.get("structured_output") is None:
+        return status, "no structured_output"
+    try:
+        error = best_match(validator.iter_errors(data["structured_output"]))
+    except Exception as e:  # a schema that passed check_schema can still break validation (self-ref loop, bad pointer)
+        return status, f"json_schema validation failed: {type(e).__name__}: {str(e)[:150]}"
+    if error is not None:
+        where = "/".join(str(p) for p in error.absolute_path) or "<root>"
+        return status, f"structured_output fails json_schema at {where}: {error.message[:150]}"
+    return status, None
 
 
 class WorkerLoad:
@@ -284,6 +336,16 @@ def create_router_blueprint(
         if json_schema is not None and not schema_is_strict_compatible(json_schema):
             return jsonify({"error": "'json_schema' must be strict: every object sets "
                                      "\"additionalProperties\": false and lists all its properties in \"required\""}), 400
+        schema_validator: Optional[Draft202012Validator] = None
+        if json_schema is not None:
+            try:
+                Draft202012Validator.check_schema(json_schema)
+            except SchemaError as e:
+                return jsonify({"error": f"'json_schema' is not a valid JSON Schema: {e.message[:200]}"}), 400
+            bad_ref = unresolvable_ref(json_schema)
+            if bad_ref is not None:
+                return jsonify({"error": f"'json_schema' has a $ref that does not resolve inside it: {bad_ref[:200]}"}), 400
+            schema_validator = Draft202012Validator(json_schema)
         timeout_raw = body.get("timeout", 300)
         try:
             timeout_val = int(timeout_raw)
@@ -346,8 +408,19 @@ def create_router_blueprint(
                     errors.append(err_msg)
                     continue
 
-                # Return response immediately if successful or client error (e.g. 400 Bad Request)
                 response_data = resp.content
+                if schema_validator is not None and 200 <= resp.status_code < 300:
+                    worker_status_word, refusal = structured_output_refusal(response_data, schema_validator)
+                    if refusal is not None:
+                        err_msg = (
+                            f"Worker {target.clean_host} answered HTTP {resp.status_code} "
+                            f"(status {worker_status_word!r}) without a usable answer: {refusal}"
+                        )
+                        logger.warning(err_msg)
+                        errors.append(err_msg)
+                        continue
+
+                # Return response immediately if successful or client error (e.g. 400 Bad Request)
                 flask_resp = Response(
                     response_data,
                     status=resp.status_code,
