@@ -1,6 +1,6 @@
 # llm-router
 
-A lightweight, self-hosted HTTP API and load balancer for the `agy` CLI with automated quota-based routing, automatic failover, and OpenAI-compatible fallback.
+A lightweight, self-hosted HTTP API and load balancer for the `agy` CLI with automated quota-based routing and OpenAI-compatible fallback.
 
 It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS and distribute requests across multiple servers based on remaining 5-hour and weekly quotas. If all workers become unavailable or their quotas are exhausted, requests automatically fall back to an external OpenAI-compatible API provider (OpenAI, OpenRouter, Groq, Together, vLLM, etc.) with identical response formatting.
 
@@ -13,7 +13,7 @@ It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS a
 - **Worker** (`is_worker: true`, `is_router: false`):
   Runs on servers where the `agy` CLI is installed and authenticated. A background thread polls `agy -p /usage --output-format json` every 60 seconds and caches quota statistics in memory and `data/limits.json`. Serves `/limits` instantly with zero delay, and executes prompts via `/chat`.
 - **Router** (`is_worker: false`, `is_router: true`):
-  Acts as an intelligent reverse proxy. When receiving a prompt at `/router/chat`, it polls the `/limits` of all configured workers in parallel, checks remaining weekly and 5-hour quotas, and forwards the prompt to the worker with the highest remaining quota for the requested model group. If all workers fail or quotas are depleted, it automatically routes to the configured fallback API.
+  Acts as an intelligent reverse proxy. When receiving a prompt at `/router/chat`, it polls the `/limits` of all configured workers in parallel, checks remaining weekly and 5-hour quotas, and forwards the prompt to the worker with the highest remaining quota for the requested model group. If the picked worker refuses or no worker has quota, it automatically routes to the configured fallback API.
 - **Hybrid** (`is_worker: true`, `is_router: true`):
   Acts simultaneously as a local worker and as a load-balancing router.
 
@@ -29,7 +29,7 @@ It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS a
                    ├── 1. Polls all workers concurrently (/limits)
                    ├── 2. Filters out exhausted quotas (weekly <= 0.001)
                    ├── 3. Selects best server (fewest calls in flight, then highest 5h quota)
-                   └── 4. Proxies request with automatic failover chain
+                   └── 4. Proxies request to that one worker (refusal → fallback)
                             │
            ┌────────────────┴──────────────────────────┐
            │ (Normal Quota-Based Execution)            │ (Fallback if workers
@@ -50,8 +50,8 @@ It allows you to expose local `agy` non-interactive CLI runs over secure HTTPS a
 - **Lightweight Dependencies**: Pure Python using only `Flask`, `Requests`, `PyYAML` and `jsonschema`. No Docker or compilation required.
 - **Instant Limits Endpoint**: `/limits` is served straight from an in-memory cache. Quotas update automatically every 60 seconds in a background thread.
 - **Model-Aware Quota Routing**: Automatically separates Gemini models and Claude/GPT models to route against the correct quota bucket.
-- **Automatic Multi-Tier Failover**: If the top worker fails (network timeout, HTTP 5xx, HTTP 429 quota exhaustion, or — for a request with `json_schema` — a 2xx answer without a `structured_output` that the schema accepts), the router immediately tries the next best worker in the ranked list; each worker is tried at most once per call.
-- **OpenAI-Compatible Fallback**: Automatically invokes an external API (OpenAI, OpenRouter, Groq, Together, or local vLLM) when all workers are offline or exhausted.
+- **One Worker Attempt per Call**: The call goes to exactly one worker. If it refuses (network error or timeout, HTTP 5xx, HTTP 429 quota exhaustion, or — for a request with `json_schema` — a 2xx answer without a `structured_output` that the schema accepts), the router goes straight to the fallback, or answers HTTP 502 with the worker's refusal when no fallback is configured; other workers are not tried. A worker attempt may last up to its timeout (600 s in practice) and refusals are about 1% of calls, so retrying on other workers cost the client minutes; the fallback is paid, but only for those refusals.
+- **OpenAI-Compatible Fallback**: Automatically invokes an external API (OpenAI, OpenRouter, Groq, Together, or local vLLM) when all workers are offline or exhausted, or the picked worker refuses.
 - **Reasoning Model Support**: Supports thinking/reasoning models (such as `o1`, `o3`, or custom reasoning models) with configurable `reasoning_effort` (`"low"`, `"medium"`, `"high"`), set in config only: a request's `effort` targets the agy model variant and is never carried over to the fallback model.
 - **Universal Response Format**: Fallback responses are normalized to match the `agy` worker schema (`response`, `status`, `conversation_id`, `duration_seconds`, `usage.input_tokens`, `usage.output_tokens`, `usage.thinking_tokens`) while preserving standard OpenAI keys (`prompt_tokens`, `completion_tokens`) for complete dual compatibility.
 - **Built-in CLI Validator**: Run `python3 check_config.py` to inspect syntax, credentials, and system environment with colored terminal output.
@@ -138,7 +138,7 @@ workers:
     user: admin
     password: worker2-password
 
-# Optional fallback provider (called when all workers fail or quotas are depleted)
+# Optional fallback provider (called when the picked worker refuses or no worker has quota)
 fallback:
   enabled: true
   api_key: sk-your-openai-api-key
@@ -261,7 +261,7 @@ Response:
 This is not configurable. `--dangerously-skip-permissions` is never passed.
 
 #### Structured output (`json_schema`)
-Optional `json_schema` (a JSON object whose root has `"type": "object"`) is passed to `agy --json-schema`. The validated result arrives in the `structured_output` field (`response` carries the same JSON as text). Other schemas are refused with HTTP 400. The router forwards the field to workers unchanged and refuses with HTTP 400 a schema that is not valid JSON Schema (draft 2020-12) or has a `$ref` that does not resolve inside the schema. A worker's 2xx answer counts only if it carries a `structured_output` valid against the schema; otherwise (status `SUCCESS` without the field included) the router logs one line with the worker, its status and the reason, and tries the next worker, then the fallback. The OpenAI-compatible fallback sends it as Chat Completions structured output (`response_format: {"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), always with `strict: true`, so the answer is guaranteed to match the schema; therefore the router refuses with HTTP 400 any schema in which some object does not set `additionalProperties: false` or does not list all its properties in `required` (OpenAI's strict-mode requirement); the parsed object comes back in `structured_output` the same way, and an answer that is not a JSON object is an error (HTTP 502).
+Optional `json_schema` (a JSON object whose root has `"type": "object"`) is passed to `agy --json-schema`. The validated result arrives in the `structured_output` field (`response` carries the same JSON as text). Other schemas are refused with HTTP 400. The router forwards the field to workers unchanged and refuses with HTTP 400 a schema that is not valid JSON Schema (draft 2020-12) or has a `$ref` that does not resolve inside the schema. A worker's 2xx answer counts only if it carries a `structured_output` valid against the schema; otherwise (status `SUCCESS` without the field included) the router logs one line with the worker, its status and the reason, and goes to the fallback (HTTP 502 without one). The OpenAI-compatible fallback sends it as Chat Completions structured output (`response_format: {"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), always with `strict: true`, so the answer is guaranteed to match the schema; therefore the router refuses with HTTP 400 any schema in which some object does not set `additionalProperties: false` or does not list all its properties in `required` (OpenAI's strict-mode requirement); the parsed object comes back in `structured_output` the same way, and an answer that is not a JSON object is an error (HTTP 502).
 ```bash
 curl -X POST https://llm1.example.com/chat -u admin:password -H "Content-Type: application/json" \
   -d '{"prompt": "Suggest two MA configs", "model": "gemini-3.8-flash-low",
@@ -310,7 +310,7 @@ Response:
 
 ### 5. Router Load-Balanced Prompt
 `POST /router/chat` (Basic Auth)
-Automatically selects the optimal worker with the highest remaining quota for the requested model group. If the `model` field is omitted from the request body, the router automatically resolves it to the configured `default_model` before forwarding to workers. If workers fail or are depleted, falls back automatically to the external API.
+Automatically selects the optimal worker with the highest remaining quota for the requested model group. If the `model` field is omitted from the request body, the router automatically resolves it to the configured `default_model` before forwarding to workers. If the picked worker refuses or no worker has quota, falls back automatically to the external API.
 
 ```bash
 curl -X POST https://llm-router.example.com/router/chat \
@@ -385,18 +385,18 @@ When a request arrives at `/router/chat`:
    Any worker with a weekly quota remaining fraction `<= 0.001` (0%) is excluded.
 4. **Ranking & Load Distribution**:
    Quotas reach the router with a delay, so ranking by quota alone sends concurrent calls to the same worker. The router process therefore keeps, in memory and under one lock, the number of calls in flight per worker. Among eligible workers it picks by: fewer calls in flight → higher 5-hour quota (1% tiers) → random. The in-flight count is released when the call ends, whatever the outcome (success, error, timeout). Nothing is stored on disk: after a restart the counters start empty.
-5. **Failover Execution**:
-   The router forwards the call to the picked worker. If that worker experiences a connection failure, network timeout, HTTP 5xx server error, or HTTP 429 quota error, the router picks again by the same order among the workers not yet tried.
+5. **Execution**:
+   The router forwards the call to the picked worker, once. A connection failure, network timeout, HTTP 5xx server error, HTTP 429 quota error or an unusable `json_schema` answer is a refusal: no other worker is tried.
 6. **OpenAI-Compatible Fallback**:
-   If no workers have sufficient weekly quota, all workers are offline, or every candidate in the failover chain returns an error, the router transparently executes the prompt via the configured fallback API provider. The fallback uses `fallback.reasoning_effort` and `fallback.timeout` from config, whatever the request says.
+   If no workers have sufficient weekly quota, all workers are offline, or the picked worker refuses, the router transparently executes the prompt via the configured fallback API provider. Without a fallback the answer is HTTP 503 (no worker available) or HTTP 502 with the worker's refusal in `worker_error`. The fallback uses `fallback.reasoning_effort` and `fallback.timeout` from config, whatever the request says.
 7. **Time budget**:
-   The request's `timeout` (default `300` s) bounds each worker attempt; workers are tried one after another. The fallback then gets `fallback.timeout` in full. Worst case of one `/router/chat` call: `4 s (limits poll) + eligible_workers × timeout + fallback.timeout`; with 5 workers, `timeout: 600` and `fallback.timeout: 600` that is 4 + 3000 + 600 = 3604 s. A client's HTTP timeout must be at least that sum.
+   The request's `timeout` (default `300` s) bounds the worker attempt. The fallback then gets `fallback.timeout` in full. Worst case of one `/router/chat` call: `4 s (limits poll) + timeout + fallback.timeout`; with `timeout: 600` and `fallback.timeout: 600` that is 4 + 600 + 600 = 1204 s. A client's HTTP timeout must be at least that sum.
 
 ---
 
 ## Testing
 
-Run the comprehensive test suite (72 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, failover handling, fallback mocking, and Unicode safety):
+Run the comprehensive test suite (83 standard library unittest tests covering YAML configuration parsing, quota tracking, worker ranking, refusal handling, fallback mocking, and Unicode safety):
 
 ```bash
 venv/bin/python test_all.py -v

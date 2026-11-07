@@ -210,22 +210,15 @@ class WorkerLoad:
         self._lock = threading.Lock()
         self.inflight: Dict[str, int] = {}
 
-    def acquire(
-        self,
-        ranked: List[Tuple[WorkerStatus, float]],
-        tried: set,
-    ) -> Optional[Tuple[WorkerStatus, float]]:
-        """Pick the best untried candidate and count the call as in flight.
+    def acquire(self, ranked: List[Tuple[WorkerStatus, float]]) -> Tuple[WorkerStatus, float]:
+        """Pick the best candidate of a non-empty `ranked` and count the call as in flight.
 
         Order: fewer calls in flight, then higher 5h quota (1 % tier).
         Equal candidates keep the order of `ranked`, which select_best_workers shuffled.
         """
         with self._lock:
-            candidates = [item for item in ranked if item[0].target.clean_host not in tried]
-            if not candidates:
-                return None
             best = min(
-                candidates,
+                ranked,
                 key=lambda item: (
                     self.inflight.get(item[0].target.clean_host, 0),
                     -round(item[1], 2),
@@ -260,11 +253,11 @@ def create_router_blueprint(
         model: str,
         statuses: List[WorkerStatus],
         json_schema: Optional[Dict[str, Any]] = None,
-        worker_errors: Optional[List[str]] = None,
+        worker_error: Optional[str] = None,
     ):
         """Attempt OpenAI-compatible fallback API call and return Flask response."""
         logger.info(
-            "All workers exhausted/failed for group=%s, attempting fallback API (effort=%s)",
+            "No worker available or the picked worker refused for group=%s, attempting fallback API (effort=%s)",
             quota_group, fb_config.reasoning_effort
         )
         try:
@@ -276,11 +269,11 @@ def create_router_blueprint(
         except FallbackError as e:
             logger.error("Fallback API also failed: %s", e.message)
             error_response: Dict[str, Any] = {
-                "error": "All workers and fallback failed",
+                "error": "Worker and fallback failed" if worker_error else "No available worker and fallback failed",
                 "fallback_error": e.message,
             }
-            if worker_errors:
-                error_response["worker_errors"] = worker_errors
+            if worker_error:
+                error_response["worker_error"] = worker_error
             else:
                 error_response["workers_summary"] = [s.to_dict() for s in statuses]
 
@@ -372,83 +365,69 @@ def create_router_blueprint(
                 "workers_summary": [s.to_dict() for s in statuses]
             }), 503
 
-        # 3. Try routing to the best worker, with automatic fallback to next best on failure
-        errors: List[str] = []
-        tried: set = set()
-        while True:
-            picked = load.acquire(ranked, tried)
-            if picked is None:
-                break
-            worker_status, five_hour_rem = picked
-            target = worker_status.target
-            tried.add(target.clean_host)
-            chat_url = f"{target.base_url}/chat"
-            logger.info(
-                "Routing request (model=%s, group=%s) to %s (5h quota: %.1f%%)",
-                model, quota_group, target.clean_host, five_hour_rem * 100
+        # 3. Exactly one attempt: the picked worker. A refusal goes straight to the fallback (or 502), never
+        #    to another worker: an attempt may last the whole timeout, and a chain of them cost clients minutes.
+        worker_status, five_hour_rem = load.acquire(ranked)
+        target = worker_status.target
+        chat_url = f"{target.base_url}/chat"
+        logger.info(
+            "Routing request (model=%s, group=%s) to %s (5h quota: %.1f%%)",
+            model, quota_group, target.clean_host, five_hour_rem * 100
+        )
+
+        try:
+            resp = requests.post(
+                chat_url,
+                auth=(target.user, target.password),
+                json=body,
+                timeout=timeout_val,
+                headers={"User-Agent": "llm-router/1.0"}
             )
 
-            try:
-                resp = requests.post(
-                    chat_url,
-                    auth=(target.user, target.password),
-                    json=body,
-                    timeout=timeout_val,
-                    headers={"User-Agent": "llm-router/1.0"}
+            # A server error (500, 502, 503, 504) or quota exhaustion (429) is a refusal of the worker.
+            if resp.status_code >= 500 or resp.status_code == 429:
+                refusal = (
+                    f"Worker {target.clean_host} returned HTTP {resp.status_code}: "
+                    f"{resp.text[:150]}"
                 )
-
-                # If the worker returned a server error (500, 502, 503, 504) or quota exhaustion (429),
-                # fail over to the next candidate worker.
-                if resp.status_code >= 500 or resp.status_code == 429:
-                    err_msg = (
-                        f"Worker {target.clean_host} returned HTTP {resp.status_code}: "
-                        f"{resp.text[:150]}"
-                    )
-                    logger.warning(err_msg)
-                    errors.append(err_msg)
-                    continue
-
+            else:
+                refusal = None
                 response_data = resp.content
                 if schema_validator is not None and 200 <= resp.status_code < 300:
-                    worker_status_word, refusal = structured_output_refusal(response_data, schema_validator)
-                    if refusal is not None:
-                        err_msg = (
+                    worker_status_word, reason = structured_output_refusal(response_data, schema_validator)
+                    if reason is not None:
+                        refusal = (
                             f"Worker {target.clean_host} answered HTTP {resp.status_code} "
-                            f"(status {worker_status_word!r}) without a usable answer: {refusal}"
+                            f"(status {worker_status_word!r}) without a usable answer: {reason}"
                         )
-                        logger.warning(err_msg)
-                        errors.append(err_msg)
-                        continue
 
-                # Return response immediately if successful or client error (e.g. 400 Bad Request)
-                flask_resp = Response(
-                    response_data,
-                    status=resp.status_code,
-                    mimetype=resp.headers.get("Content-Type", "application/json")
-                )
-                flask_resp.headers["X-Routed-Worker"] = target.clean_host
-                flask_resp.headers["X-Routed-Model-Group"] = quota_group
-                flask_resp.headers["X-Routed-5h-Remaining"] = f"{five_hour_rem:.4f}"
-                return flask_resp
+                if refusal is None:
+                    # Return the response if successful or a client error (e.g. 400 Bad Request)
+                    flask_resp = Response(
+                        response_data,
+                        status=resp.status_code,
+                        mimetype=resp.headers.get("Content-Type", "application/json")
+                    )
+                    flask_resp.headers["X-Routed-Worker"] = target.clean_host
+                    flask_resp.headers["X-Routed-Model-Group"] = quota_group
+                    flask_resp.headers["X-Routed-5h-Remaining"] = f"{five_hour_rem:.4f}"
+                    return flask_resp
 
-            except requests.exceptions.RequestException as e:
-                err_msg = f"Worker {target.clean_host} network error: {e}"
-                logger.warning(err_msg)
-                errors.append(err_msg)
-                # Fall through to try next candidate worker
-            finally:
-                load.release(target.clean_host)
+        except requests.exceptions.RequestException as e:
+            refusal = f"Worker {target.clean_host} network error: {e}"
+        finally:
+            load.release(target.clean_host)
 
-        # All eligible workers failed — try fallback if configured
+        logger.warning(refusal)
         if fallback_config:
             return _try_fallback(
                 prompt, fallback_config, quota_group, model,
-                statuses, json_schema=json_schema, worker_errors=errors
+                statuses, json_schema=json_schema, worker_error=refusal
             )
 
         return jsonify({
-            "error": "All eligible workers failed to process the request",
-            "attempted_errors": errors
+            "error": "The worker failed to process the request",
+            "worker_error": refusal,
         }), 502
 
     return bp

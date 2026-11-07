@@ -315,7 +315,7 @@ AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED"}
         self.assertEqual(parsed["conversation_id"], "xyz")
         self.assertEqual(parsed["status"], "ERROR")
 
-    def test_router_failover(self):
+    def test_router_worker_502_without_fallback_is_502(self):
         app = Flask(__name__)
         w1 = WorkerTarget("worker1.example.com", "u", "p")
         w2 = WorkerTarget("worker2.example.com", "u", "p")
@@ -327,9 +327,11 @@ AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED"}
         s1 = WorkerStatus(target=w1, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.9)
         s2 = WorkerStatus(target=w2, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.8)
 
+        posted = []
         with patch("router.poll_worker_limits", side_effect=[s1, s2]):
-            # Simulate worker1 returning 502, and worker2 returning 200
+            # worker1 (the pick) returns 502; worker2 would answer but must not be asked
             def mock_post(url, **kwargs):
+                posted.append(url)
                 mock_resp = MagicMock()
                 if "worker1.example.com" in url:
                     mock_resp.status_code = 502
@@ -345,14 +347,12 @@ AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED"}
 
             with patch("requests.post", side_effect=mock_post):
                 res = client.post("/router/chat", json={"prompt": "test prompt", "model": "gemini-3.8-flash-high"})
-                # Should have failed over to worker2 and returned 200!
-                self.assertEqual(res.status_code, 200)
-                data = res.get_json()
-                self.assertEqual(data["response"], "Routed to worker 2")
-                self.assertEqual(res.headers.get("X-Routed-Worker"), "worker2.example.com")
+                self.assertEqual(res.status_code, 502)
+                self.assertIn("worker1.example.com returned HTTP 502", res.get_json()["worker_error"])
+                self.assertEqual(posted, ["https://worker1.example.com/chat"])
 
 
-    def test_router_failover_429(self):
+    def test_router_worker_429_without_fallback_is_502(self):
         app = Flask(__name__)
         w1 = WorkerTarget("worker1.example.com", "u", "p")
         w2 = WorkerTarget("worker2.example.com", "u", "p")
@@ -364,8 +364,10 @@ AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED"}
         s1 = WorkerStatus(target=w1, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.95)
         s2 = WorkerStatus(target=w2, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.90)
 
+        posted = []
         with patch("router.poll_worker_limits", side_effect=[s1, s2]):
             def mock_post(url, **kwargs):
+                posted.append(url)
                 mock_resp = MagicMock()
                 if "worker1.example.com" in url:
                     mock_resp.status_code = 429
@@ -381,9 +383,9 @@ AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED"}
 
             with patch("requests.post", side_effect=mock_post):
                 res = client.post("/router/chat", json={"prompt": "hello", "model": "gemini-3.8-flash-high"})
-                self.assertEqual(res.status_code, 200)
-                self.assertEqual(res.get_json()["response"], "From worker 2")
-                self.assertEqual(res.headers.get("X-Routed-Worker"), "worker2.example.com")
+                self.assertEqual(res.status_code, 502)
+                self.assertIn("HTTP 429", res.get_json()["worker_error"])
+                self.assertEqual(posted, ["https://worker1.example.com/chat"])
 
 
 class TestFallbackConfig(unittest.TestCase):
@@ -797,7 +799,7 @@ class TestRouterFallbackIntegration(unittest.TestCase):
             self.assertIn("No available workers", res.get_json()["error"])
 
     def test_fallback_also_fails_502(self):
-        """C8: All workers failed + fallback also fails → 502 with both errors."""
+        """C8: No eligible worker + fallback fails → 502 with the fallback error."""
         w1 = WorkerTarget("w1.example.com", "u", "p")
         app = self._make_app_with_fallback([w1], self._make_fb_config())
         client = app.test_client()
@@ -833,8 +835,8 @@ class TestRouterFallbackIntegration(unittest.TestCase):
                     self.assertEqual(res.headers.get("X-Routed-Worker"), "w1.example.com")
                     fb_mock.assert_not_called()
 
-    def test_failover_to_worker2_no_fallback(self):
-        """C10: Worker1 fails, worker2 succeeds → fallback NOT called."""
+    def test_worker_refusal_goes_straight_to_fallback(self):
+        """C10: The picked worker refuses → fallback at once; worker2 is never called."""
         w1 = WorkerTarget("w1.example.com", "u", "p")
         w2 = WorkerTarget("w2.example.com", "u", "p")
         app = self._make_app_with_fallback([w1, w2], self._make_fb_config())
@@ -843,8 +845,10 @@ class TestRouterFallbackIntegration(unittest.TestCase):
         s1 = WorkerStatus(target=w1, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.95)
         s2 = WorkerStatus(target=w2, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.90)
 
+        posted = []
         with patch("router.poll_worker_limits", side_effect=[s1, s2]):
             def mock_post(url, **kwargs):
+                posted.append(url)
                 m = MagicMock()
                 if "w1.example.com" in url:
                     m.status_code = 502
@@ -856,12 +860,33 @@ class TestRouterFallbackIntegration(unittest.TestCase):
                     m.headers = {"Content-Type": "application/json"}
                     return m
 
+            fb_result = {"status": "SUCCESS", "response": "From fallback", "source": "openai-fallback"}
             with patch("requests.post", side_effect=mock_post):
-                with patch("router.call_openai_fallback") as fb_mock:
+                with patch("router.call_openai_fallback", return_value=fb_result) as fb_mock:
                     res = client.post("/router/chat", json={"prompt": "test"})
                     self.assertEqual(res.status_code, 200)
-                    self.assertEqual(res.headers.get("X-Routed-Worker"), "w2.example.com")
-                    fb_mock.assert_not_called()
+                    self.assertEqual(res.headers.get("X-Routed-Worker"), "openai-fallback")
+                    self.assertEqual(res.get_json()["response"], "From fallback")
+                    fb_mock.assert_called_once()
+                    self.assertEqual(posted, ["https://w1.example.com/chat"])
+
+    def test_worker_refusal_and_fallback_failure_is_502_with_both_errors(self):
+        """C11: The picked worker refuses and the fallback fails → 502 naming both; no second worker."""
+        w1 = WorkerTarget("w1.example.com", "u", "p")
+        w2 = WorkerTarget("w2.example.com", "u", "p")
+        app = self._make_app_with_fallback([w1, w2], self._make_fb_config())
+        s1 = WorkerStatus(target=w1, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.95)
+        s2 = WorkerStatus(target=w2, is_online=True, status_code=200, gemini_weekly=1.0, gemini_5h=0.90)
+        with patch("router.poll_worker_limits", side_effect=[s1, s2]), \
+                patch("requests.post", side_effect=requests.exceptions.ConnectionError("refused")) as post, \
+                patch("router.call_openai_fallback", side_effect=FallbackError("OpenAI API returned 500")):
+            res = app.test_client().post("/router/chat", json={"prompt": "test"})
+        self.assertEqual(res.status_code, 502)
+        data = res.get_json()
+        self.assertEqual(data["error"], "Worker and fallback failed")
+        self.assertIn("w1.example.com network error", data["worker_error"])
+        self.assertIn("500", data["fallback_error"])
+        self.assertEqual(post.call_count, 1)
 
 
 class TestRouterFallbackEdgeCases(unittest.TestCase):
@@ -1122,9 +1147,8 @@ class TestWorkerSpread(unittest.TestCase):
         with poll, patch("requests.post", side_effect=requests.exceptions.Timeout("slow")):
             res = app.test_client().post("/router/chat", json={"prompt": "p"})
         self.assertEqual(res.status_code, 502)
-        self.assertEqual(len(res.get_json()["attempted_errors"]), 3)  # failover still tries every worker
-        self.assertEqual(bp.worker_load.inflight,
-                         {"w1.example.com": 0, "w2.example.com": 0, "w3.example.com": 0})
+        self.assertIn("network error", res.get_json()["worker_error"])
+        self.assertEqual(list(bp.worker_load.inflight.values()), [0])  # one attempt, released
 
     def test_inflight_returns_to_zero_after_unexpected_exception(self):
         app, bp, poll = self._make(self._equal_workers(2))
@@ -1267,48 +1291,41 @@ class TestWorkerEmptyStructuredOutput(unittest.TestCase):
         refusals = [line for line in logs.output if "without a usable answer" in line]
         return res, posted, fb_mock, refusals
 
-    def test_empty_success_goes_to_the_next_worker(self):
+    def test_empty_success_goes_straight_to_fallback(self):
         res, posted, fb_mock, refusals = self._run({
             "w1.example.com": {"status": "SUCCESS", "response": ""},
             "w2.example.com": {"status": "SUCCESS", "structured_output": self.GOOD},
         })
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.headers["X-Routed-Worker"], "w2.example.com")
+        self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
         self.assertEqual(res.get_json()["structured_output"], self.GOOD)
-        self.assertEqual(posted, ["w1.example.com", "w2.example.com"])
-        fb_mock.assert_not_called()
+        self.assertEqual(posted, ["w1.example.com"])
+        fb_mock.assert_called_once()
+        self.assertEqual(fb_mock.call_args.kwargs["json_schema"], self.SCHEMA)
         self.assertEqual(len(refusals), 1)
         self.assertIn("w1.example.com", refusals[0])
         self.assertIn("'SUCCESS'", refusals[0])
         self.assertIn("no structured_output", refusals[0])
 
-    def test_all_workers_empty_success_goes_to_fallback(self):
-        empty = {"status": "SUCCESS", "response": ""}
-        res, posted, fb_mock, refusals = self._run(
-            {"w1.example.com": empty, "w2.example.com": empty, "w3.example.com": empty})
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
-        self.assertEqual(sorted(posted), ["w1.example.com", "w2.example.com", "w3.example.com"])
-        fb_mock.assert_called_once()
-        self.assertEqual(fb_mock.call_args.kwargs["json_schema"], self.SCHEMA)
-        self.assertEqual(len(refusals), 3)
-
-    def test_structured_output_failing_the_schema_goes_to_the_next_worker(self):
+    def test_structured_output_failing_the_schema_goes_straight_to_fallback(self):
         res, posted, fb_mock, refusals = self._run({
             "w1.example.com": {"status": "SUCCESS", "structured_output": {"configs": [{"a": "x"}], "notes": "n"}},
             "w2.example.com": {"status": "SUCCESS", "structured_output": self.GOOD},
         })
-        self.assertEqual(res.headers["X-Routed-Worker"], "w2.example.com")
-        fb_mock.assert_not_called()
+        self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
+        self.assertEqual(posted, ["w1.example.com"])
+        fb_mock.assert_called_once()
         self.assertIn("fails json_schema at configs/0/a", refusals[0])
 
-    def test_all_workers_empty_without_fallback_is_502(self):
-        empty = {"status": "SUCCESS"}
+    def test_empty_success_without_fallback_is_502(self):
         res, posted, fb_mock, refusals = self._run(
-            {"w1.example.com": empty, "w2.example.com": empty}, fallback=False)
+            {"w1.example.com": {"status": "SUCCESS"},
+             "w2.example.com": {"status": "SUCCESS", "structured_output": self.GOOD}}, fallback=False)
         self.assertEqual(res.status_code, 502)
-        self.assertEqual(len(res.get_json()["attempted_errors"]), 2)
-        self.assertEqual(len(posted), 2)
+        self.assertIn("w1.example.com", res.get_json()["worker_error"])
+        self.assertIn("no structured_output", res.get_json()["worker_error"])
+        self.assertEqual(posted, ["w1.example.com"])
+        fb_mock.assert_not_called()
 
     def test_text_request_without_schema_is_unchanged(self):
         res, posted, fb_mock, refusals = self._run(
@@ -1353,10 +1370,14 @@ class TestWorkerEmptyStructuredOutput(unittest.TestCase):
                   "properties": {"x": {"$ref": "#/$defs/num"}}, "$defs": {"num": {"type": "number"}}}
         res, posted, fb_mock, refusals = self._run({
             "w1.example.com": {"status": "SUCCESS", "structured_output": {"x": "str"}},
-            "w2.example.com": {"status": "SUCCESS", "structured_output": {"x": 2}},
         }, body={"prompt": "p", "json_schema": schema})
-        self.assertEqual(res.headers["X-Routed-Worker"], "w2.example.com")
+        self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
         self.assertIn("fails json_schema at x", refusals[0])
+        res, posted, fb_mock, refusals = self._run({
+            "w1.example.com": {"status": "SUCCESS", "structured_output": {"x": 2}},
+        }, body={"prompt": "p", "json_schema": schema})
+        self.assertEqual(res.headers["X-Routed-Worker"], "w1.example.com")
+        self.assertEqual(refusals, [])
 
     def test_schema_that_breaks_validation_is_a_refusal_not_500(self):
         schema = {"type": "object", "additionalProperties": False, "required": ["x"],
@@ -1366,7 +1387,8 @@ class TestWorkerEmptyStructuredOutput(unittest.TestCase):
             "w2.example.com": {"status": "SUCCESS", "structured_output": {"x": 1}},
         }, body={"prompt": "p", "json_schema": schema})
         self.assertEqual(res.headers["X-Routed-Worker"], "openai-fallback")
-        self.assertEqual(len(refusals), 2)
+        self.assertEqual(posted, ["w1.example.com"])
+        self.assertEqual(len(refusals), 1)
         self.assertIn("json_schema validation failed", refusals[0])
 
     def test_deeply_nested_worker_body_is_a_refusal(self):
