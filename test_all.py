@@ -1068,6 +1068,46 @@ class TestExecutorToolsDisabled(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(ex.call_args.kwargs["json_schema"], schema)
 
+class TestExecutorMissingStructuredOutputLog(unittest.TestCase):
+    """A json_schema answer without structured_output is returned unchanged and logged once at WARNING."""
+
+    SCHEMA = {"type": "object", "properties": {"notes": {"type": "string"}}, "required": ["notes"]}
+
+    def _run(self, stdout, stderr="", json_schema=SCHEMA):
+        proc = MagicMock(returncode=0, stdout=stdout, stderr=stderr)
+        with patch("executor.subprocess.run", return_value=proc), \
+                self.assertLogs("llm-router.executor", level="INFO") as logs:
+            result = execute_prompt(agy_binary="agy", prompt="secret prompt", model="gemini-model",
+                                    json_schema=json_schema)
+        return result, [r for r in logs.records if r.levelname == "WARNING"]
+
+    def test_success_without_structured_output_is_logged(self):
+        stdout = '{"status":"SUCCESS","response":"' + "x" * 2000 + '"}'
+        result, warnings = self._run(stdout, stderr="line1\nline2")
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertNotIn("structured_output", result)
+        self.assertEqual(len(warnings), 1)
+        msg = warnings[0].getMessage()
+        self.assertIn("keys=['response', 'status']", msg)
+        self.assertIn(f"stdout_bytes={len(stdout)} stderr_bytes=11", msg)
+        self.assertIn('stderr_head="line1\\nline2"', msg)
+        self.assertNotIn("\n", msg)
+        self.assertNotIn("secret prompt", msg)
+        self.assertNotIn("x" * 600, msg)
+
+    def test_unparseable_stdout_is_logged(self):
+        _, warnings = self._run("not json")
+        self.assertIn("keys=None", warnings[-1].getMessage())
+
+    def test_answer_with_structured_output_is_not_logged(self):
+        _, warnings = self._run('{"status":"SUCCESS","structured_output":{"notes":"n"}}')
+        self.assertEqual(warnings, [])
+
+    def test_text_request_is_not_logged(self):
+        _, warnings = self._run('{"status":"SUCCESS","response":"ok"}', json_schema=None)
+        self.assertEqual(warnings, [])
+
+
 class TestWorkerSpread(unittest.TestCase):
     """The router spreads calls: fewer calls in flight first, then the higher 5h quota."""
 

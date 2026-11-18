@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import socket
 import subprocess
 from typing import Any, Dict, Optional
 
@@ -32,6 +33,28 @@ class AgyExecutionError(Exception):
 # supported"; IPv4 is located correctly. agy is a Go binary: netdns=cgo makes it use the glibc resolver, and
 # RES_OPTIONS=no-aaaa (glibc >= 2.36) makes that resolver return no IPv6 addresses.
 AGY_IPV4_ONLY_ENV = {"GODEBUG": "netdns=cgo", "RES_OPTIONS": "no-aaaa"}
+
+# How many leading bytes of agy's stdout and stderr the missing-structured_output warning shows.
+NO_STRUCTURED_OUTPUT_LOG_BYTES = 500
+
+
+def _log_head(text: str) -> str:
+    """The first NO_STRUCTURED_OUTPUT_LOG_BYTES bytes of text as one escaped line."""
+    head = text.encode("utf-8", errors="replace")[:NO_STRUCTURED_OUTPUT_LOG_BYTES]
+    return json.dumps(head.decode("utf-8", errors="replace"))
+
+
+def log_missing_structured_output(proc: subprocess.CompletedProcess, parsed: Optional[Dict[str, Any]]) -> None:
+    """One WARNING line describing an agy answer to a json_schema request that carries no structured_output."""
+    logger.warning(
+        "agy answered a json_schema request without structured_output: worker=%s exit=%d keys=%s "
+        "stdout_bytes=%d stderr_bytes=%d stdout_head=%s stderr_head=%s",
+        socket.gethostname(), proc.returncode,
+        sorted(parsed.keys()) if parsed is not None else None,
+        len(proc.stdout.encode("utf-8", errors="replace")), len(proc.stderr.encode("utf-8", errors="replace")),
+        _log_head(proc.stdout), _log_head(proc.stderr)
+    )
+
 
 def extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
     """Robustly extract JSON dictionary from CLI output that may contain log lines or banners."""
@@ -162,9 +185,13 @@ def execute_prompt(
                 logger.warning("agy returned ERROR status (code %d): %s", code, err_text)
                 raise AgyExecutionError(err_text, status_code=code, details=parsed)
 
+            if json_schema is not None and "structured_output" not in parsed:
+                log_missing_structured_output(proc, parsed)
             return parsed
 
         logger.warning("Could not extract JSON from agy stdout. Raw: %s", stdout_str[:200])
+        if json_schema is not None:
+            log_missing_structured_output(proc, None)
         return {
             "status": "SUCCESS",
             "raw_text": stdout_str,
