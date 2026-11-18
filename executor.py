@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import subprocess
+import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("llm-router.executor")
@@ -44,16 +45,61 @@ def _log_head(text: str) -> str:
     return json.dumps(head.decode("utf-8", errors="replace"))
 
 
-def log_missing_structured_output(proc: subprocess.CompletedProcess, parsed: Optional[Dict[str, Any]]) -> None:
-    """One WARNING line describing an agy answer to a json_schema request that carries no structured_output."""
+def log_missing_structured_output(proc: subprocess.CompletedProcess, parsed: Optional[Dict[str, Any]],
+                                  retry: bool = False) -> None:
+    """One WARNING line describing an agy answer to a json_schema request that carries no structured_output.
+
+    retry=True marks the empty run that execute_prompt is about to repeat (the line ends with retry=1)."""
     logger.warning(
         "agy answered a json_schema request without structured_output: worker=%s exit=%d keys=%s "
-        "stdout_bytes=%d stderr_bytes=%d stdout_head=%s stderr_head=%s",
+        "stdout_bytes=%d stderr_bytes=%d stdout_head=%s stderr_head=%s%s",
         socket.gethostname(), proc.returncode,
         sorted(parsed.keys()) if parsed is not None else None,
         len(proc.stdout.encode("utf-8", errors="replace")), len(proc.stderr.encode("utf-8", errors="replace")),
-        _log_head(proc.stdout), _log_head(proc.stderr)
+        _log_head(proc.stdout), _log_head(proc.stderr), " retry=1" if retry else ""
     )
+
+
+# agy's stderr warning when it ends a run without calling the model.
+AGY_EMPTY_RUN_STDERR = "run ended with no output"
+
+
+def is_empty_run(parsed: Dict[str, Any], stderr: str) -> bool:
+    """agy ended the run without invoking the model and still reported SUCCESS.
+
+    Seen on json_schema requests: exit 0, status SUCCESS, empty response, no structured_output,
+    usage.input_tokens 0 and the stderr warning AGY_EMPTY_RUN_STDERR. A positive input token count
+    means the model ran, so that answer is not an empty run whatever stderr says."""
+    if parsed.get("status") != "SUCCESS" or "structured_output" in parsed:
+        return False
+    usage = parsed.get("usage")
+    input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
+    if isinstance(input_tokens, int):
+        return input_tokens == 0
+    return AGY_EMPTY_RUN_STDERR in stderr
+
+
+def _run_agy(cmd: list, timeout_seconds: int) -> subprocess.CompletedProcess:
+    """One agy invocation; a timeout or a failure to start becomes AgyExecutionError."""
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            cwd=AGY_WORKSPACE_DIR,
+            env={**os.environ, **AGY_IPV4_ONLY_ENV}
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("agy execution timed out after %ds", timeout_seconds)
+        raise AgyExecutionError(
+            f"Prompt execution timed out after {timeout_seconds} seconds",
+            status_code=504
+        )
+    except Exception as e:
+        logger.error("Failed to run agy process: %s", e)
+        raise AgyExecutionError(f"Subprocess execution failed: {e}", status_code=500)
 
 
 def extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
@@ -140,25 +186,17 @@ def execute_prompt(
 
     logger.info("Executing agy: model=%s, prompt_len=%d", model, len(prompt))
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-            cwd=AGY_WORKSPACE_DIR,
-            env={**os.environ, **AGY_IPV4_ONLY_ENV}
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("agy execution timed out after %ds", timeout_seconds)
-        raise AgyExecutionError(
-            f"Prompt execution timed out after {timeout_seconds} seconds",
-            status_code=504
-        )
-    except Exception as e:
-        logger.error("Failed to run agy process: %s", e)
-        raise AgyExecutionError(f"Subprocess execution failed: {e}", status_code=500)
+    # timeout_seconds bounds the whole call, retry included: the router waits for the worker exactly that long.
+    deadline = time.monotonic() + timeout_seconds
+    proc = _run_agy(cmd, timeout_seconds)
+
+    # An empty run of a json_schema request is repeated once on this worker; any other answer is not.
+    if json_schema is not None and output_format == "json" and proc.returncode == 0:
+        first = extract_json_payload(proc.stdout.strip())
+        remaining = int(deadline - time.monotonic())
+        if first is not None and is_empty_run(first, proc.stderr) and remaining >= 1:
+            log_missing_structured_output(proc, first, retry=True)
+            proc = _run_agy(cmd, remaining)
 
     if proc.returncode != 0:
         err_msg = proc.stderr.strip() or proc.stdout.strip() or f"Process failed with exit code {proc.returncode}"

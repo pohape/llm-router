@@ -1108,6 +1108,73 @@ class TestExecutorMissingStructuredOutputLog(unittest.TestCase):
         self.assertEqual(warnings, [])
 
 
+class TestExecutorEmptyRunRetry(unittest.TestCase):
+    """agy ending a json_schema run without invoking the model is retried once on the same worker."""
+
+    SCHEMA = {"type": "object", "properties": {"notes": {"type": "string"}}, "required": ["notes"]}
+    # The shape captured on helsinki1 on 2026-11-18: SUCCESS, empty response, zero input tokens.
+    EMPTY = ('{"status":"SUCCESS","response":"","duration_seconds":0,"num_turns":1,'
+             '"usage":{"input_tokens":0,"output_tokens":0}}')
+    EMPTY_STDERR = "warning: run ended with no output and no recorded error\n"
+    GOOD = '{"status":"SUCCESS","structured_output":{"notes":"n"},"usage":{"input_tokens":120}}'
+
+    def _run(self, *procs, timeout_seconds=300):
+        with patch("executor.subprocess.run", side_effect=list(procs)) as run, \
+                self.assertLogs("llm-router.executor", level="INFO") as logs:
+            result = execute_prompt(agy_binary="agy", prompt="secret prompt", model="gemini-model",
+                                    json_schema=self.SCHEMA, timeout_seconds=timeout_seconds)
+        return result, run, [r.getMessage() for r in logs.records if r.levelname == "WARNING"]
+
+    def _proc(self, stdout, stderr=""):
+        return MagicMock(returncode=0, stdout=stdout, stderr=stderr)
+
+    def test_empty_run_is_retried_and_the_retry_answer_returned(self):
+        result, run, warnings = self._run(self._proc(self.EMPTY, self.EMPTY_STDERR), self._proc(self.GOOD))
+        self.assertEqual(result["structured_output"], {"notes": "n"})
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args, run.call_args_list[1].args)
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0].endswith(" retry=1"))
+        self.assertIn("keys=['duration_seconds', 'num_turns', 'response', 'status', 'usage']", warnings[0])
+        self.assertNotIn("secret prompt", warnings[0])
+
+    def test_empty_run_twice_returns_the_empty_answer(self):
+        result, run, warnings = self._run(self._proc(self.EMPTY, self.EMPTY_STDERR),
+                                          self._proc(self.EMPTY, self.EMPTY_STDERR))
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn("structured_output", result)
+        self.assertEqual(result["usage"]["input_tokens"], 0)
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(warnings[0].endswith(" retry=1"))
+        self.assertNotIn("retry=", warnings[1])
+
+    def test_answer_after_model_ran_is_not_retried(self):
+        stdout = '{"status":"SUCCESS","response":"prose","usage":{"input_tokens":57,"output_tokens":3}}'
+        result, run, warnings = self._run(self._proc(stdout, self.EMPTY_STDERR))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result["response"], "prose")
+        self.assertEqual(len(warnings), 1)
+        self.assertNotIn("retry=", warnings[0])
+
+    def test_empty_run_without_usage_is_recognised_by_stderr(self):
+        result, run, _ = self._run(self._proc('{"status":"SUCCESS","response":""}', self.EMPTY_STDERR),
+                                   self._proc(self.GOOD))
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("structured_output", result)
+
+    def test_retry_gets_only_the_time_left(self):
+        with patch("executor.time.monotonic", side_effect=[1000.0, 1040.0]):
+            _, run, _ = self._run(self._proc(self.EMPTY, self.EMPTY_STDERR), self._proc(self.GOOD),
+                                  timeout_seconds=100)
+        self.assertEqual([c.kwargs["timeout"] for c in run.call_args_list], [100, 60])
+
+    def test_no_retry_when_no_time_is_left(self):
+        with patch("executor.time.monotonic", side_effect=[1000.0, 1099.5]):
+            result, run, _ = self._run(self._proc(self.EMPTY, self.EMPTY_STDERR), timeout_seconds=100)
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn("structured_output", result)
+
+
 class TestWorkerSpread(unittest.TestCase):
     """The router spreads calls: fewer calls in flight first, then the higher 5h quota."""
 
